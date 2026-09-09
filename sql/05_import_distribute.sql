@@ -57,26 +57,43 @@ SELECT ip,
 FROM stg_domain
 WHERE ip IS NOT NULL AND ip != '';
 
--- ---------- 3) liens : résolution valeur → id → link_opt (ids Int64) ----------
+-- ---------- 3) liens : résolution valeur → id typé → link_opt (ids Int64) ----------
+-- links.csv référence des VALEURS de nœuds ("google.com", "1.2.3.4") + le type
+-- de chaque extrémité (type_1 / type_2 = 'fqdn' | 'ip'). On remplace chaque
+-- valeur par son id :
+--   type = 'fqdn' → id_fqdn depuis fqdn_search
+--   type = 'ip'   → id_ip   depuis ip_search
+-- Les ids ne sont JAMAIS créés ici : une extrémité absente de ces tables
+-- fait ignorer le lien (INNER JOIN). Importer d'abord le *node*.csv
+-- correspondant si besoin.
 
--- Étape 3a : table de correspondance valeur → id, matérialisée UNE seule fois
--- (au lieu de recalculer 2 × l'union+GROUP BY dans la requête de jointure).
--- L'agrégation externe est forcée : 78M+ de String ne tiendraient pas en RAM.
+-- Étape 3a : table de correspondance (type, valeur) → id, matérialisée UNE
+-- seule fois. L'agrégation externe est forcée : 78M+ de String ne tiendraient
+-- pas en RAM.
 DROP TABLE IF EXISTS tmp_node_map;
-CREATE TABLE tmp_node_map (value String, id Int64)
+CREATE TABLE tmp_node_map (node_type String, value String, id Int64)
 ENGINE = MergeTree
-ORDER BY value;
+ORDER BY (node_type, value);
 
 INSERT INTO tmp_node_map
-SELECT value, argMax(toInt64(id_fqdn), version) AS id FROM fqdn_search GROUP BY value
+SELECT 'fqdn', value, argMax(toInt64(id_fqdn), version) FROM fqdn_search GROUP BY value
 UNION ALL
-SELECT value, argMax(toInt64(id_ip), version) AS id FROM ip_search GROUP BY value
+SELECT 'ip',   value, argMax(toInt64(id_ip),   version) FROM ip_search   GROUP BY value
 SETTINGS max_bytes_before_external_group_by = 8589934592; -- 8 Gio
+
+-- Diagnostic (affiché pendant l'import) : liens dont au moins une extrémité
+-- est inconnue de fqdn_search / ip_search → ils ne seront PAS insérés.
+SELECT count() AS liens_ignores_noeud_inconnu
+FROM stg_link AS l
+WHERE (lower(l.type_1), l.id_node_1) NOT IN (SELECT node_type, value FROM tmp_node_map)
+   OR (lower(l.type_2), l.id_node_2) NOT IN (SELECT node_type, value FROM tmp_node_map);
 
 -- Étape 3b : jointure par tri-fusion externe (partial_merge). Les deux côtés
 -- sont triés avec débordement disque puis fusionnés : la mémoire reste bornée
 -- quel que soit le volume (grace_hash échoue ici : il alloue > 6 Gio d'un coup
 -- avant que son spill ne s'amorce → MEMORY_LIMIT_EXCEEDED).
+-- Le type est normalisé (lower) dans une sous-requête pour que les clés de
+-- jointure restent de simples colonnes (requis par partial_merge).
 INSERT INTO link_opt (id_node_1, id_node_2, source_id, detection_date, version)
 SELECT n1.id,
        n2.id,
@@ -85,9 +102,13 @@ SELECT n1.id,
                 toUnixTimestamp(now())),
        coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)),
                 toUnixTimestamp(now()))
-FROM stg_link AS l
-INNER JOIN tmp_node_map AS n1 ON n1.value = l.id_node_1
-INNER JOIN tmp_node_map AS n2 ON n2.value = l.id_node_2
+FROM (
+    SELECT id_node_1, id_node_2, id_source, creation_date, update_date,
+           lower(type_1) AS t1, lower(type_2) AS t2
+    FROM stg_link
+) AS l
+INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1
+INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2
 SETTINGS join_algorithm = 'partial_merge',
          max_bytes_before_external_sort = 8589934592; -- 8 Gio
 

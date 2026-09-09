@@ -51,10 +51,13 @@ automatiquement avant le chargement.
 Choix d'import :
 - `domains.json` n'a ni id ni rank → id synthétique `cityHash64(valeur)`
   tronqué, `rank = 0`, `version = now()` ;
-- les liens référencent des **valeurs** (ex. `netflix.com`) : résolution
-  valeur → id par jointure ; un lien dont une extrémité est inconnue est
-  ignoré. La jointure utilise `join_algorithm = 'grace_hash'` (débordement
-  sur disque) pour tenir en mémoire à très grande volumétrie ;
+- les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
+  chaque extrémité (`type_1` / `type_2` = `fqdn` | `ip`) : résolution
+  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`. Un
+  lien dont une extrémité est inconnue de ces tables est ignoré (jointure
+  INNER) et compté dans `liens_ignores_noeud_inconnu` pendant l'import.
+  La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
+  débordement disque) pour tenir en mémoire à très grande volumétrie ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
   (asynchrone) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).

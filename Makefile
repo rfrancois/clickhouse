@@ -1,4 +1,4 @@
-PYTHON := .venv/bin/python3
+PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
 .PHONY: all up wait init generate test import pdf down clean

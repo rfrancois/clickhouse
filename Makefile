@@ -23,7 +23,7 @@ generate: .venv
 test: .venv
 	$(PYTHON) scripts/test.py
 
-import: .venv
+import:
 	@test -n "$(FILE)" || { echo "Usage : make import FILE=<archive.zip|fichier|dossier>"; exit 1; }
 	$(PYTHON) scripts/import_data.py "$(FILE)"
 

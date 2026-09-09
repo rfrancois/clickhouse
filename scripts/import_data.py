@@ -40,6 +40,11 @@ CLIENT = ["docker", "exec", "-i", "bench_clickhouse", "clickhouse-client",
 TOLER = ["--input_format_allow_errors_num=1000",
          "--input_format_allow_errors_ratio=0.001"]
 
+# Les tables de staging (stg_domain surtout) peuvent dépasser la limite de
+# sécurité par défaut (50 Gio) : on lève le garde-fou pour les DROP du script,
+# qui sont voulus (staging jetable, recréé à chaque import).
+DROP_OK = ["--max_table_size_to_drop=0", "--max_partition_size_to_drop=0"]
+
 FREE_WARN_GIB = 15
 
 
@@ -55,7 +60,7 @@ def query(sql: str) -> str:
 
 def run_sql_file(path: Path) -> None:
     with open(path, "rb") as f:
-        subprocess.run(CLIENT + ["--multiquery"], stdin=f, check=True)
+        subprocess.run(CLIENT + DROP_OK + ["--multiquery"], stdin=f, check=True)
 
 
 def iter_blocks(path: Path):

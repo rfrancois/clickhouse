@@ -17,10 +17,13 @@
 -- plafonne sa RAM et déborde sur disque au lieu de faire tuer le
 -- process par l'OOM killer du noyau (exit 137).
 -- ------------------------------------------------------------
-SET max_threads = 2;                                  -- limite le nb de tampons concurrents
-SET max_memory_usage = 12000000000;                  -- 12 Gio / requête (plafond dur, < mémoire serveur)
-SET max_bytes_before_external_group_by = 2000000000;  -- 2 Gio → spill disque
-SET max_bytes_before_external_sort = 2000000000;      -- 2 Gio → spill disque
+-- La VM Docker a peu de RAM : au-delà de ~8 Gio/requête le noyau tue le
+-- serveur (exit 137) AVANT que ClickHouse ne voie sa limite. On vise donc
+-- une empreinte minimale : 1 thread, plafond bas, débordement disque très tôt.
+SET max_threads = 1;                                  -- un seul jeu de tampons
+SET max_memory_usage = 6000000000;                   -- 6 Gio / requête (échec propre bien avant l'OOM noyau)
+SET max_bytes_before_external_group_by = 536870912;   -- 512 Mio → spill disque
+SET max_bytes_before_external_sort = 536870912;       -- 512 Mio → spill disque
 SET join_algorithm = 'full_sorting_merge';            -- jointure par tri-fusion externe
 
 -- ---------- 1) node.csv → fqdn / ip ----------

@@ -20,8 +20,10 @@ tient le milliard de lignes) :
   5. distribution vers les tables optimisées :
      - node.csv / domains.json → fqdn_search / ip_search
        (sql/05_import_distribute.sql)
-     - liens : résolution valeur → id puis stg_link → link_opt, en N tranches
-       (distribute_links, pour tenir en RAM sur une VM Docker modeste)
+     - domains.json → link_opt : liens cn ↔ dns et cn ↔ ip, ids = hash de la
+       valeur, insert direct sans jointure (sql/05_import_distribute.sql)
+     - liens CSV : résolution valeur → id puis stg_link → link_opt, en N
+       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste)
 """
 import os
 import shutil

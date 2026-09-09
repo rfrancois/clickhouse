@@ -2,10 +2,13 @@
 -- DISTRIBUTION staging → tables optimisées — partie NODE / DOMAINS
 -- (fqdn_search / ip_search ; les tables naïves ne sont plus alimentées)
 -- ============================================================
--- La résolution des LIENS (stg_link → link_opt) n'est plus faite ici : elle
--- est pilotée en TRANCHES par scripts/import_data.py (distribute_links), sinon
--- les jointures sur les grosses tables font tuer le serveur par l'OOM killer
--- (exit 137) sur les VM Docker à faible RAM.
+-- La résolution des LIENS CSV (stg_link → link_opt) n'est plus faite ici :
+-- elle est pilotée en TRANCHES par scripts/import_data.py (distribute_links),
+-- sinon les jointures sur les grosses tables font tuer le serveur par l'OOM
+-- killer (exit 137) sur les VM Docker à faible RAM.
+-- Les liens issus de domains.json (cn ↔ dns / cn ↔ ip) sont, eux, produits
+-- ici (section 2b) : les deux ids sont de simples hash de la valeur, aucune
+-- jointure n'est nécessaire.
 --
 -- Hypothèses (cf. README) :
 --  * node.csv fournit id/rank/date ; domains.json n'a ni id ni rank
@@ -67,6 +70,33 @@ SELECT ip,
        toUnixTimestamp(now())
 FROM stg_domain
 WHERE ip IS NOT NULL AND ip != '';
+
+-- ---------- 2b) domains.json → liens cn ↔ dns et cn ↔ ip ----------
+-- link_opt ne stocke que des ids : on recalcule l'id synthétique de chaque
+-- extrémité par le même hash qu'en section 2 (aucune jointure, insert direct).
+-- Le cn est toujours id_node_1 ; la projection inverse de link_opt couvre
+-- l'autre sens. Auto-liens (dns == cn) filtrés.
+
+-- cn ─ dns  (fqdn ↔ fqdn)
+INSERT INTO link_opt (id_node_1, id_node_2, source_id, detection_date, version)
+SELECT toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
+       toInt64(bitAnd(cityHash64(d), 0x7FFFFFFF)),
+       0,
+       toUnixTimestamp(now()),
+       toUnixTimestamp(now())
+FROM (SELECT cn, arrayJoin(dns) AS d FROM stg_domain
+      WHERE cn IS NOT NULL AND cn != '')
+WHERE d IS NOT NULL AND d != '' AND d != cn;
+
+-- cn ─ ip  (fqdn ↔ ip)
+INSERT INTO link_opt (id_node_1, id_node_2, source_id, detection_date, version)
+SELECT toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
+       toInt64(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
+       0,
+       toUnixTimestamp(now()),
+       toUnixTimestamp(now())
+FROM stg_domain
+WHERE cn IS NOT NULL AND cn != '' AND ip IS NOT NULL AND ip != '';
 
 -- ---------- 3) staging node / domains nettoyé ----------
 -- stg_link est conservé : consommé ensuite par distribute_links() côté Python.

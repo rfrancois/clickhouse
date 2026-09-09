@@ -26,6 +26,15 @@ SET max_bytes_before_external_group_by = 536870912;   -- 512 Mio → spill disqu
 SET max_bytes_before_external_sort = 536870912;       -- 512 Mio → spill disque
 SET join_algorithm = 'full_sorting_merge';            -- jointure par tri-fusion externe
 
+-- Les merges en arrière-plan (déclenchés par le chargement de staging) sont le
+-- principal concurrent mémoire : ils s'ajoutent à la requête de distribution et
+-- font tuer le serveur par l'OOM killer (exit 137, sans message). On les met en
+-- pause pendant l'import ; ils reprennent à la fin (START MERGES). Les caches
+-- sont vidés pour laisser la RAM aux requêtes.
+SYSTEM STOP MERGES;
+SYSTEM DROP MARK CACHE;
+SYSTEM DROP UNCOMPRESSED CACHE;
+
 -- ---------- 1) node.csv → fqdn / ip ----------
 
 INSERT INTO fqdn_search (value, id_fqdn, rank, version)
@@ -203,3 +212,6 @@ DROP TABLE IF EXISTS tmp_link_r2;
 DROP TABLE stg_node;
 DROP TABLE stg_link;
 DROP TABLE stg_domain;
+
+-- Reprise des merges mis en pause au début (dédup ReplacingMergeTree, etc.).
+SYSTEM START MERGES;

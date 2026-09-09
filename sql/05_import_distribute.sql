@@ -11,6 +11,18 @@
 --    par jointure sur les tables optimisées. Un lien dont une extrémité
 --    est inconnue est ignoré (jointure INNER).
 
+-- ------------------------------------------------------------
+-- Garde-fous mémoire (machine mono-nœud ~30 Gio de RAM).
+-- Appliqués à toute la session --multiquery : chaque requête lourde
+-- plafonne sa RAM et déborde sur disque au lieu de faire tuer le
+-- process par l'OOM killer du noyau (exit 137).
+-- ------------------------------------------------------------
+SET max_threads = 2;                                 -- limite le nb de tampons concurrents
+SET max_memory_usage = 8000000000;                  -- 8 Gio / requête (plafond dur)
+SET max_bytes_before_external_group_by = 2000000000; -- 2 Gio → spill disque
+SET max_bytes_before_external_sort = 2000000000;     -- 2 Gio → spill disque
+SET join_algorithm = 'full_sorting_merge';           -- jointure par tri-fusion externe
+
 -- ---------- 1) node.csv → fqdn / ip ----------
 
 INSERT INTO fqdn_search (value, id_fqdn, rank, version)
@@ -87,61 +99,98 @@ FROM (
     SELECT lower(type_2) AS node_type, id_node_2 AS value FROM stg_link
 )
 WHERE value != ''
-GROUP BY node_type, value
-SETTINGS max_bytes_before_external_group_by = 4294967296; -- 4 Gio
+GROUP BY node_type, value;
 
 -- 3a-2 : correspondance (type, valeur) → id, restreinte aux valeurs ci-dessus.
--- ReplacingMergeTree : on garde l'id de la version la plus récente.
+-- Jointure (et non `value IN (sous-requête)`) : full_sorting_merge trie les
+-- deux côtés sur disque, aucun gros set de String en RAM.
+-- ReplacingMergeTree : on garde l'id de la version la plus récente (argMax).
 DROP TABLE IF EXISTS tmp_node_map;
 CREATE TABLE tmp_node_map (node_type String, value String, id Int64)
 ENGINE = MergeTree
 ORDER BY (node_type, value);
 
 INSERT INTO tmp_node_map
-SELECT 'fqdn', value, argMax(toInt64(id_fqdn), version)
-FROM fqdn_search
-WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'fqdn')
-GROUP BY value
+SELECT 'fqdn', f.value, argMax(toInt64(f.id_fqdn), f.version)
+FROM fqdn_search AS f
+INNER JOIN (SELECT value FROM tmp_link_values WHERE node_type = 'fqdn') AS v
+        ON v.value = f.value
+GROUP BY f.value
 UNION ALL
-SELECT 'ip', value, argMax(toInt64(id_ip), version)
-FROM ip_search
-WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'ip')
-GROUP BY value
-SETTINGS max_bytes_before_external_group_by = 4294967296; -- 4 Gio
+SELECT 'ip', i.value, argMax(toInt64(i.id_ip), i.version)
+FROM ip_search AS i
+INNER JOIN (SELECT value FROM tmp_link_values WHERE node_type = 'ip') AS v
+        ON v.value = i.value
+GROUP BY i.value;
 
--- Diagnostic (affiché pendant l'import) : liens dont au moins une extrémité
--- est inconnue de fqdn_search / ip_search → ils ne seront PAS insérés.
-SELECT count() AS liens_ignores_noeud_inconnu
-FROM stg_link AS l
-WHERE (lower(l.type_1), l.id_node_1) NOT IN (SELECT node_type, value FROM tmp_node_map)
-   OR (lower(l.type_2), l.id_node_2) NOT IN (SELECT node_type, value FROM tmp_node_map);
+-- Étape 3b : résolution des deux extrémités, UNE jointure simple à la fois.
+-- On évite la jointure chaînée (l ⋈ n1 ⋈ n2) qui empile deux tris externes
+-- dans la même requête ; ici chaque étape = 1 tri-fusion, mémoire bornée.
 
--- Étape 3b : jointure par tri-fusion externe (partial_merge). Les deux côtés
--- sont triés avec débordement disque puis fusionnés : la mémoire reste bornée
--- quel que soit le volume (grace_hash échoue ici : il alloue > 6 Gio d'un coup
--- avant que son spill ne s'amorce → MEMORY_LIMIT_EXCEEDED).
--- Le type est normalisé (lower) dans une sous-requête pour que les clés de
--- jointure restent de simples colonnes (requis par partial_merge).
-INSERT INTO link_opt (id_node_1, id_node_2, source_id, detection_date, version)
-SELECT n1.id,
-       n2.id,
-       toInt32OrZero(l.id_source),
-       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)),
-                toUnixTimestamp(now())),
-       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)),
-                toUnixTimestamp(now()))
+-- 3b-1 : remplace l'extrémité 1 par son id. tmp_link_r1 est trié sur (t2,
+-- node_2) pour que la jointure 3b-2 n'ait plus rien à trier de ce côté.
+DROP TABLE IF EXISTS tmp_link_r1;
+CREATE TABLE tmp_link_r1
+(
+    id_node_1     Int64,
+    node_2        String,
+    t2            String,
+    id_source     String,
+    creation_date String,
+    update_date   String
+)
+ENGINE = MergeTree
+ORDER BY (t2, node_2);
+
+INSERT INTO tmp_link_r1
+SELECT n1.id, l.id_node_2, l.t2, l.id_source, l.creation_date, l.update_date
 FROM (
     SELECT id_node_1, id_node_2, id_source, creation_date, update_date,
            lower(type_1) AS t1, lower(type_2) AS t2
     FROM stg_link
 ) AS l
-INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1
-INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2
-SETTINGS join_algorithm = 'partial_merge',
-         max_bytes_before_external_sort = 8589934592; -- 8 Gio
+INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1;
+
+-- 3b-2 : remplace l'extrémité 2 par son id.
+DROP TABLE IF EXISTS tmp_link_r2;
+CREATE TABLE tmp_link_r2
+(
+    id_node_1     Int64,
+    id_node_2     Int64,
+    id_source     String,
+    creation_date String,
+    update_date   String
+)
+ENGINE = MergeTree
+ORDER BY (id_node_1, id_node_2);
+
+INSERT INTO tmp_link_r2
+SELECT r.id_node_1, n2.id, r.id_source, r.creation_date, r.update_date
+FROM tmp_link_r1 AS r
+INNER JOIN tmp_node_map AS n2 ON n2.node_type = r.t2 AND n2.value = r.node_2;
+
+-- Diagnostic (affiché pendant l'import) : combien de liens perdus, et où.
+SELECT (SELECT count() FROM stg_link)                                AS liens_staging,
+       (SELECT count() FROM tmp_link_r1)                             AS noeud1_resolu,
+       (SELECT count() FROM tmp_link_r2)                             AS deux_noeuds_resolus,
+       (SELECT count() FROM stg_link) - (SELECT count() FROM tmp_link_r2)
+                                                                     AS liens_ignores_noeud_inconnu;
+
+-- 3b-3 : typage final → link_opt.
+INSERT INTO link_opt (id_node_1, id_node_2, source_id, detection_date, version)
+SELECT id_node_1,
+       id_node_2,
+       toInt32OrZero(id_source),
+       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)),
+                toUnixTimestamp(now())),
+       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(update_date)),
+                toUnixTimestamp(now()))
+FROM tmp_link_r2;
 
 DROP TABLE tmp_node_map;
 DROP TABLE IF EXISTS tmp_link_values;
+DROP TABLE IF EXISTS tmp_link_r1;
+DROP TABLE IF EXISTS tmp_link_r2;
 
 -- ---------- 4) staging nettoyé ----------
 

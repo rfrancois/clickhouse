@@ -15,6 +15,7 @@ services:
         hard: 262144
     volumes:
       - ch_data:/var/lib/clickhouse
+      - ./docker/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
 
 volumes:
   ch_data:

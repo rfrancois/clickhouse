@@ -1,0 +1,17 @@
+<clickhouse>
+    <!-- VM Docker à faible RAM : ClickHouse se limite lui-même largement en
+         dessous du total, pour refuser proprement une requête trop lourde
+         (code 241) au lieu de se faire tuer par l'OOM killer du noyau
+         (exit 137, sans message) pendant l'import de liens. -->
+    <max_server_memory_usage_to_ram_ratio>0.5</max_server_memory_usage_to_ram_ratio>
+
+    <!-- caches réduits : la RAM va aux requêtes, pas au cache -->
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+
+    <merge_tree>
+        <!-- borne la RAM des merges en arrière-plan qui tournent pendant
+             l'import (staging fraîchement chargé + grosses tables search) -->
+        <max_bytes_to_merge_at_max_space_in_pool>2147483648</max_bytes_to_merge_at_max_space_in_pool>
+    </merge_tree>
+</clickhouse>

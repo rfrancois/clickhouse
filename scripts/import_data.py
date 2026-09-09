@@ -52,10 +52,14 @@ DROP_OK = ["--max_table_size_to_drop=0", "--max_partition_size_to_drop=0"]
 # Garde-fous mémoire pour la résolution des liens en tranches (cf.
 # distribute_links). Passés en ligne de commande car ces requêtes sont
 # lancées une par une, hors du fichier SQL.
+#   use_skip_indexes=0 : fqdn_search est triée sur (id_fqdn, value), donc
+#   l'index ngram sur `value` n'élague rien pour une égalité — inutile de
+#   charger ~2 Gio de filtres de Bloom pour un scan qui sera complet.
 MEM = ["--max_threads=1",
-       "--max_memory_usage=6000000000",
+       "--max_memory_usage=11000000000",
        "--max_bytes_before_external_group_by=536870912",
        "--max_bytes_before_external_sort=536870912",
+       "--use_skip_indexes=0",
        "--join_algorithm=full_sorting_merge"]
 
 # Nombre de tranches pour la distribution des liens : chaque requête ne traite

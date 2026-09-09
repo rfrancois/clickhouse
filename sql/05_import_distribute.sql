@@ -17,9 +17,10 @@
 -- très tôt plutôt que de pousser le serveur jusqu'à l'OOM.
 -- ------------------------------------------------------------
 SET max_threads = 1;
-SET max_memory_usage = 6000000000;                   -- 6 Gio / requête
+SET max_memory_usage = 11000000000;                  -- 11 Gio / requête (< cap serveur)
 SET max_bytes_before_external_group_by = 536870912;  -- 512 Mio → spill disque
 SET max_bytes_before_external_sort = 536870912;      -- 512 Mio → spill disque
+SET use_skip_indexes = 0;                            -- l'index ngram n'aide pas ici, il coûte de la RAM
 
 -- ---------- 1) node.csv → fqdn / ip ----------
 

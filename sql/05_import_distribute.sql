@@ -17,11 +17,11 @@
 -- plafonne sa RAM et déborde sur disque au lieu de faire tuer le
 -- process par l'OOM killer du noyau (exit 137).
 -- ------------------------------------------------------------
-SET max_threads = 2;                                 -- limite le nb de tampons concurrents
-SET max_memory_usage = 8000000000;                  -- 8 Gio / requête (plafond dur)
-SET max_bytes_before_external_group_by = 2000000000; -- 2 Gio → spill disque
-SET max_bytes_before_external_sort = 2000000000;     -- 2 Gio → spill disque
-SET join_algorithm = 'full_sorting_merge';           -- jointure par tri-fusion externe
+SET max_threads = 2;                                  -- limite le nb de tampons concurrents
+SET max_memory_usage = 12000000000;                  -- 12 Gio / requête (plafond dur, < mémoire serveur)
+SET max_bytes_before_external_group_by = 2000000000;  -- 2 Gio → spill disque
+SET max_bytes_before_external_sort = 2000000000;      -- 2 Gio → spill disque
+SET join_algorithm = 'full_sorting_merge';            -- jointure par tri-fusion externe
 
 -- ---------- 1) node.csv → fqdn / ip ----------
 
@@ -102,26 +102,29 @@ WHERE value != ''
 GROUP BY node_type, value;
 
 -- 3a-2 : correspondance (type, valeur) → id, restreinte aux valeurs ci-dessus.
--- Jointure (et non `value IN (sous-requête)`) : full_sorting_merge trie les
--- deux côtés sur disque, aucun gros set de String en RAM.
--- ReplacingMergeTree : on garde l'id de la version la plus récente (argMax).
+-- `value IN (sous-requête)` (et NON un JOIN) : la grande table est parcourue en
+-- streaming avec un simple test d'appartenance, sans tri global (le JOIN, lui,
+-- force full_sorting_merge à trier toute fqdn_search/ip_search → OOM).
+-- Le set du IN est petit : tmp_link_values est déjà dédupliqué.
+-- Deux INSERT séparés (pas d'UNION ALL) pour ne pas cumuler les deux
+-- agrégations en mémoire. GROUP BY argMax : on garde l'id de la version la
+-- plus récente ; il déborde sur disque (réglages session).
 DROP TABLE IF EXISTS tmp_node_map;
 CREATE TABLE tmp_node_map (node_type String, value String, id Int64)
 ENGINE = MergeTree
 ORDER BY (node_type, value);
 
 INSERT INTO tmp_node_map
-SELECT 'fqdn', f.value, argMax(toInt64(f.id_fqdn), f.version)
-FROM fqdn_search AS f
-INNER JOIN (SELECT value FROM tmp_link_values WHERE node_type = 'fqdn') AS v
-        ON v.value = f.value
-GROUP BY f.value
-UNION ALL
-SELECT 'ip', i.value, argMax(toInt64(i.id_ip), i.version)
-FROM ip_search AS i
-INNER JOIN (SELECT value FROM tmp_link_values WHERE node_type = 'ip') AS v
-        ON v.value = i.value
-GROUP BY i.value;
+SELECT 'fqdn', value, argMax(toInt64(id_fqdn), version)
+FROM fqdn_search
+WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'fqdn')
+GROUP BY value;
+
+INSERT INTO tmp_node_map
+SELECT 'ip', value, argMax(toInt64(id_ip), version)
+FROM ip_search
+WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'ip')
+GROUP BY value;
 
 -- Étape 3b : résolution des deux extrémités, UNE jointure simple à la fois.
 -- On évite la jointure chaînée (l ⋈ n1 ⋈ n2) qui empile deux tris externes

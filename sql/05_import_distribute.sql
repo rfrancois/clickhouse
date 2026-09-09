@@ -67,19 +67,47 @@ WHERE ip IS NOT NULL AND ip != '';
 -- fait ignorer le lien (INNER JOIN). Importer d'abord le *node*.csv
 -- correspondant si besoin.
 
--- Étape 3a : table de correspondance (type, valeur) → id, matérialisée UNE
--- seule fois. L'agrégation externe est forcée : 78M+ de String ne tiendraient
--- pas en RAM.
+-- Étape 3a : on ne résout QUE les valeurs de nœuds réellement citées par les
+-- liens à importer — surtout PAS toute la table fqdn_search / ip_search : un
+-- GROUP BY value global sur des dizaines de millions de String fait exploser
+-- la RAM (MEMORY_LIMIT_EXCEEDED).
+
+-- 3a-1 : ensemble (type, valeur) référencé par stg_link (petit : borné par le
+-- nombre de nœuds distincts du fichier, pas par la taille des tables).
+DROP TABLE IF EXISTS tmp_link_values;
+CREATE TABLE tmp_link_values (node_type String, value String)
+ENGINE = MergeTree
+ORDER BY (node_type, value);
+
+INSERT INTO tmp_link_values
+SELECT node_type, value
+FROM (
+    SELECT lower(type_1) AS node_type, id_node_1 AS value FROM stg_link
+    UNION ALL
+    SELECT lower(type_2) AS node_type, id_node_2 AS value FROM stg_link
+)
+WHERE value != ''
+GROUP BY node_type, value
+SETTINGS max_bytes_before_external_group_by = 4294967296; -- 4 Gio
+
+-- 3a-2 : correspondance (type, valeur) → id, restreinte aux valeurs ci-dessus.
+-- ReplacingMergeTree : on garde l'id de la version la plus récente.
 DROP TABLE IF EXISTS tmp_node_map;
 CREATE TABLE tmp_node_map (node_type String, value String, id Int64)
 ENGINE = MergeTree
 ORDER BY (node_type, value);
 
 INSERT INTO tmp_node_map
-SELECT 'fqdn', value, argMax(toInt64(id_fqdn), version) FROM fqdn_search GROUP BY value
+SELECT 'fqdn', value, argMax(toInt64(id_fqdn), version)
+FROM fqdn_search
+WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'fqdn')
+GROUP BY value
 UNION ALL
-SELECT 'ip',   value, argMax(toInt64(id_ip),   version) FROM ip_search   GROUP BY value
-SETTINGS max_bytes_before_external_group_by = 8589934592; -- 8 Gio
+SELECT 'ip', value, argMax(toInt64(id_ip), version)
+FROM ip_search
+WHERE value IN (SELECT value FROM tmp_link_values WHERE node_type = 'ip')
+GROUP BY value
+SETTINGS max_bytes_before_external_group_by = 4294967296; -- 4 Gio
 
 -- Diagnostic (affiché pendant l'import) : liens dont au moins une extrémité
 -- est inconnue de fqdn_search / ip_search → ils ne seront PAS insérés.
@@ -113,6 +141,7 @@ SETTINGS join_algorithm = 'partial_merge',
          max_bytes_before_external_sort = 8589934592; -- 8 Gio
 
 DROP TABLE tmp_node_map;
+DROP TABLE IF EXISTS tmp_link_values;
 
 -- ---------- 4) staging nettoyé ----------
 

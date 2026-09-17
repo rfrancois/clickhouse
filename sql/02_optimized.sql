@@ -14,10 +14,14 @@ CREATE TABLE fqdn_search
     id_fqdn  Int32,
     rank     UInt32,
     version  UInt64,
-    INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1
+    INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
+    -- projection triée par rank : ... LIKE '%x%' ORDER BY rank LIMIT N lit
+    -- dans l'ordre de rank et s'arrête à N (cf. sql/06_rank_projection.sql)
+    PROJECTION p_rank (SELECT * ORDER BY rank)
 )
 ENGINE = ReplacingMergeTree(version)
-ORDER BY (id_fqdn, value);
+ORDER BY (id_fqdn, value)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE ip_search
 (

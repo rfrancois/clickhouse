@@ -77,6 +77,40 @@ EXPLAIN indexes = 1
 SELECT id_fqdn, value FROM fqdn_search WHERE value LIKE '%tube%' LIMIT 100;
 ```
 
+## Recherche triée par rank (`ORDER BY rank`)
+
+```sql
+SELECT * FROM fqdn_search WHERE value LIKE '%google.com%' ORDER BY rank LIMIT 100;
+```
+
+La table est triée sur `(id_fqdn, value)` : sans `ORDER BY`, ClickHouse
+s'arrête dès qu'il a assez de lignes ; avec `ORDER BY rank` il doit lire
+**toutes** les lignes qui matchent puis trier (scan quasi complet pour un
+terme fréquent). La projection `p_rank` (données triées par `rank`) permet
+de lire dans l'ordre de `rank` et de s'arrêter à `LIMIT` — choisie
+automatiquement par ClickHouse, en `ASC` comme en `DESC`.
+
+Base existante (sans perte, relançable) :
+
+```bash
+make migrate      # = sql/06_rank_projection.sql
+```
+
+Suivi de la construction (asynchrone) :
+
+```sql
+SELECT parts_to_do, is_done, latest_fail_reason
+FROM system.mutations WHERE table = 'fqdn_search' AND NOT is_done;
+```
+
+À savoir :
+- garder un `LIMIT` : sans lui, toutes les lignes qui matchent doivent être
+  triées, aucune structure ne peut l'éviter ;
+- pour un terme **très rare**, la projection lit toute la colonne (elle n'a
+  pas l'index ngram) ; si besoin, forcer l'ancien plan :
+  `... SETTINGS optimize_use_projections = 0` ;
+- coût : environ la taille de `fqdn_search` en disque en plus.
+
 ## Résultats historiques (dans `results/`)
 
 Les benchmarks naïf vs optimisé qui ont justifié cette architecture sont

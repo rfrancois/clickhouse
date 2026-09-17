@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init generate test import pdf down clean
+.PHONY: all up wait init migrate generate test import pdf down clean
 
 all: up wait init generate
 
@@ -16,6 +16,11 @@ wait:
 init:
 	$(CLIENT) < sql/02_optimized.sql
 	@echo "Schéma optimisé créé."
+
+# Mise à jour d'une base existante (sans perte) : projection p_rank pour ORDER BY rank
+migrate:
+	$(CLIENT) < sql/06_rank_projection.sql
+	@echo "Projection p_rank ajoutée — construction en arrière-plan (voir system.mutations)."
 
 generate: .venv
 	$(PYTHON) scripts/generate_data.py

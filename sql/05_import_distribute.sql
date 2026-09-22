@@ -12,7 +12,7 @@
 --
 -- Hypothèses (cf. README) :
 --  * node.csv fournit id/rank/date ; domains.json n'a ni id ni rank
---    → id synthétique = cityHash64(valeur) tronqué à 31 bits, rank = 0,
+--    → id synthétique = cityHash64(valeur) tronqué à 31 bits, rank = 1000000,
 --      version = now()
 
 -- ------------------------------------------------------------
@@ -30,7 +30,7 @@ SET use_skip_indexes = 0;                            -- l'index ngram n'aide pas
 INSERT INTO fqdn_search (value, id_fqdn, rank, version)
 SELECT value,
        toInt32OrZero(id),
-       toUInt32OrZero(rank),
+       if(toUInt32OrZero(rank) = 0, 1000000, toUInt32OrZero(rank)),
        coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)),
                 toUnixTimestamp(now()))
 FROM stg_node
@@ -39,7 +39,7 @@ WHERE lower(node_type) = 'fqdn' AND value != '';
 INSERT INTO ip_search (value, id_ip, rank, version)
 SELECT value,
        toInt32OrZero(id),
-       toUInt32OrZero(rank),
+       if(toUInt32OrZero(rank) = 0, 1000000, toUInt32OrZero(rank)),
        coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)),
                 toUnixTimestamp(now()))
 FROM stg_node
@@ -50,7 +50,7 @@ WHERE lower(node_type) = 'ip' AND value != '';
 INSERT INTO fqdn_search (value, id_fqdn, rank, version)
 SELECT cn,
        toInt32(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       0,
+       1000000,
        toUnixTimestamp(now())
 FROM stg_domain
 WHERE cn IS NOT NULL AND cn != '';
@@ -58,7 +58,7 @@ WHERE cn IS NOT NULL AND cn != '';
 INSERT INTO fqdn_search (value, id_fqdn, rank, version)
 SELECT value,
        toInt32(bitAnd(cityHash64(value), 0x7FFFFFFF)),
-       0,
+       1000000,
        toUnixTimestamp(now())
 FROM (SELECT arrayJoin(dns) AS value FROM stg_domain)
 WHERE value IS NOT NULL AND value != '';
@@ -66,7 +66,7 @@ WHERE value IS NOT NULL AND value != '';
 INSERT INTO ip_search (value, id_ip, rank, version)
 SELECT ip,
        toInt32(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
-       0,
+       1000000,
        toUnixTimestamp(now())
 FROM stg_domain
 WHERE ip IS NOT NULL AND ip != '';

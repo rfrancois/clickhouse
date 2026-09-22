@@ -50,7 +50,7 @@ automatiquement avant le chargement.
 
 Choix d'import :
 - `domains.json` n'a ni id ni rank → id synthétique `cityHash64(valeur)`
-  tronqué, `rank = 0`, `version = now()` ;
+  tronqué, `rank = 1000000`, `version = now()` ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
   chaque extrémité (`type_1` / `type_2` = `fqdn` | `ip`) : résolution
   `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`. Un
@@ -58,6 +58,8 @@ Choix d'import :
   INNER) et compté dans `liens_ignores_noeud_inconnu` pendant l'import.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
+- `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
+  `ORDER BY rank`) ; `make migrate` applique la même règle aux données existantes ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
   (asynchrone) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).
@@ -77,44 +79,34 @@ EXPLAIN indexes = 1
 SELECT id_fqdn, value FROM fqdn_search WHERE value LIKE '%tube%' LIMIT 100;
 ```
 
-## Recherche triée par rank (`ORDER BY rank`)
+## Recherche `LIKE '%…%'` triée par rank
 
 ```sql
-SELECT * FROM fqdn_search WHERE value LIKE '%google.com%' ORDER BY rank LIMIT 100;
+SELECT * FROM fqdn_search WHERE value LIKE '%google.com%' ORDER BY rank;
 ```
 
-La table est triée sur `(id_fqdn, value)` : sans `ORDER BY`, ClickHouse
-s'arrête dès qu'il a assez de lignes ; avec `ORDER BY rank` il doit lire
-**toutes** les lignes qui matchent puis trier (scan quasi complet pour un
-terme fréquent). La projection `p_rank` (données triées par `rank`) permet
-de lire dans l'ordre de `rank` et de s'arrêter à `LIMIT` — choisie
-automatiquement par ClickHouse, en `ASC` comme en `DESC`.
+`fqdn_search` est triée par **nom de domaine inversé**
+(`ORDER BY (reverse(value), id_fqdn)`) : tous les `*.google.com`,
+`google.com.br`… sont stockés côte à côte, donc l'index ngram ne garde que
+quelques blocs et `ORDER BY rank` — avec ou sans `LIMIT` — ne trie que les
+lignes trouvées. Triée par `id_fqdn` (ancien schéma), ces lignes étaient
+éparpillées (~1 par bloc) et chaque recherche triée relisait presque toute la
+table. La recherche par id (jointures) passe par la projection légère `p_id`.
 
-Base existante (sans perte, relançable) :
+Migrer une base existante (copie à côté, table actuelle intacte ; prévoir
+de l'espace disque ≈ taille actuelle de la table et une à quelques heures
+pour des milliards de lignes ; pas d'import pendant la copie) :
 
 ```bash
-make migrate      # = sql/06_rank_projection.sql
+make migrate        # sql/07_migrate_copy.sql : remplit fqdn_search_new, affiche les comptes
+make migrate-swap   # sql/08_migrate_swap.sql : bascule (ancienne → fqdn_search_old)
 ```
 
-Suivi de la construction (asynchrone) :
+Retour arrière : `EXCHANGE TABLES fqdn_search AND fqdn_search_old;`.
+Libérer le disque une fois satisfait :
+`DROP TABLE fqdn_search_old SETTINGS max_table_size_to_drop = 0;`
 
-```sql
-SELECT parts_to_do, is_done, latest_fail_reason
-FROM system.mutations WHERE table = 'fqdn_search' AND NOT is_done;
-```
-
-À savoir :
-- **ClickHouse récent requis** : en 24.8 la projection est ignorée pour un
-  `ORDER BY` (aucun gain). Vérifié en 26.7, la version figée dans
-  `docker-compose.yml`. Mise à jour : `make upgrade` (le volume est conservé ;
-  pas de retour possible vers 24.8 ensuite, sauvegarder avant si besoin).
-  Contrôle : `EXPLAIN SELECT ...` doit afficher `ReadFromMergeTree (p_rank)` ;
-- garder un `LIMIT` : sans lui, toutes les lignes qui matchent doivent être
-  triées, aucune structure ne peut l'éviter ;
-- pour un terme **très rare**, la projection lit toute la colonne (elle n'a
-  pas l'index ngram) ; si besoin, forcer l'ancien plan :
-  `... SETTINGS optimize_use_projections = 0` ;
-- coût : environ la taille de `fqdn_search` en disque en plus.
+Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
 ## Résultats historiques (dans `results/`)
 

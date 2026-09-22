@@ -15,12 +15,16 @@ CREATE TABLE fqdn_search
     rank     UInt32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
-    -- projection triée par rank : ... LIKE '%x%' ORDER BY rank LIMIT N lit
-    -- dans l'ordre de rank et s'arrête à N (cf. sql/06_rank_projection.sql)
-    PROJECTION p_rank (SELECT * ORDER BY rank)
+    -- recherche par id (jointure FQDN → liens → IP) : projection légère
+    -- (positions des lignes seulement), triée par id_fqdn
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_fqdn)
 )
 ENGINE = ReplacingMergeTree(version)
-ORDER BY (id_fqdn, value)
+-- tri par nom INVERSÉ : tous les *.google.com, google.com.br... sont côte à
+-- côte, donc LIKE '%google.com%' ne lit que quelques blocs, et ORDER BY rank
+-- (même sans LIMIT) ne trie que ces lignes. Même identité de ligne
+-- (id_fqdn, value) qu'avant : la déduplication est inchangée.
+ORDER BY (reverse(value), id_fqdn)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE ip_search

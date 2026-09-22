@@ -1,7 +1,7 @@
 services:
   clickhouse:
     # Version figée : 'latest' restait bloqué sur l'image téléchargée la
-    # première fois (24.8), où la projection p_rank est ignorée pour ORDER BY.
+    # première fois (24.8). 26.x requis pour la projection p_id (_part_offset).
     image: clickhouse/clickhouse-server:26.7
     container_name: bench_clickhouse
     ports:

@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init migrate upgrade generate test import pdf down clean
+.PHONY: all up wait init migrate migrate-swap upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -24,10 +24,13 @@ upgrade:
 	@$(MAKE) --no-print-directory wait
 	@docker exec bench_clickhouse clickhouse-client --user bench --password bench -q "SELECT 'ClickHouse ' || version()"
 
-# Mise à jour d'une base existante (sans perte) : projection p_rank pour ORDER BY rank
+# Base existante : copie de fqdn_search triée par nom inversé (table actuelle intacte)
 migrate:
-	$(CLIENT) < sql/06_rank_projection.sql
-	@echo "Projection p_rank ajoutée — construction en arrière-plan (voir system.mutations)."
+	$(CLIENT) < sql/07_migrate_copy.sql
+
+# Bascule vers la nouvelle table (ancienne gardée sous fqdn_search_old)
+migrate-swap:
+	$(CLIENT) < sql/08_migrate_swap.sql
 
 generate: .venv
 	$(PYTHON) scripts/generate_data.py

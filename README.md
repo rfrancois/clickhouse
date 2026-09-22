@@ -169,6 +169,24 @@ make migrate-link        # sql/12_migrate_link_copy.sql : remplit link, affiche 
 make migrate-link-swap   # sql/13_migrate_link_swap.sql : link_opt → link_opt_old
 ```
 
+### Table `property` (informations par nœud et par source)
+
+Une ligne par `(node_type, id_node, id_source)` : `payload` (JSON
+stocké en `String` compressé ZSTD, renvoyé tel quel), `detection_date`,
+`version`. `ReplacingMergeTree(version)` : une nouvelle détection d'une même
+source remplace l'ancienne (pas d'historique). `node_type` utilise le même
+`Enum8` que `link` : `(node_type, id_node)` identifie un nœud.
+Projection légère `p_source` pour « tout ce qu'a produit la source X ».
+
+```bash
+make property   # sql/14_create_property.sql : crée la table (vide) sur une base existante
+```
+
+```sql
+SELECT id_source, payload, detection_date FROM property FINAL
+WHERE node_type = 'fqdn' AND id_node = 123456;
+```
+
 ## Résultats historiques (dans `results/`)
 
 Les benchmarks naïf vs optimisé qui ont justifié cette architecture sont

@@ -5,6 +5,7 @@
 DROP TABLE IF EXISTS fqdn_search;
 DROP TABLE IF EXISTS ip_search;
 DROP TABLE IF EXISTS link;
+DROP TABLE IF EXISTS property;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :
 --    c'est l'index qui fait toute la différence, pas un changement de format
@@ -48,10 +49,10 @@ ENGINE = ReplacingMergeTree(version)
 ORDER BY (value, id_ip)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
--- 2) link : une seule table pour tous les couples d'entités, TYPÉS.
+-- 2) link : une seule table pour tous les couples de nœuds, TYPÉS.
 --    Les ids ne sont uniques qu'à l'intérieur d'un type (id_fqdn = 42 et
 --    id_ip = 42 coexistent) : (type, id) identifie un nœud, pas l'id seul.
---    Nouveau type d'entité → ajouter la valeur À LA FIN des deux Enum8
+--    Nouveau type de nœud → ajouter la valeur À LA FIN des deux Enum8
 --    (ALTER ... MODIFY COLUMN, métadonnées seules, aucune réécriture).
 CREATE TABLE link
 (
@@ -84,4 +85,30 @@ ORDER BY (type_1, id_1, type_2, id_2)
 -- 'rebuild' et non 'drop' : avec 'drop', chaque fusion de dédoublonnage
 -- supprime p_reverse de la part fusionnée → le sens inverse retombe en scan
 -- complet au fil des merges
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+-- 3) property : les informations (payload) de chaque nœud, par source.
+--    (node_type, id_node) identifie le nœud, comme dans link.
+CREATE TABLE property
+(
+    -- même Enum8 que link : ajouter un nouveau type À LA FIN, partout
+    node_type      Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
+                         'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
+                         'phone' = 8, 'social_id' = 9),
+    -- même id que fqdn_search.id_fqdn / ip_search.id_ip / link.id_1|id_2
+    id_node        Int64,
+    id_source      Int32,
+    -- renvoyé tel quel, jamais filtré : String compressé plutôt que JSON typé
+    payload        String CODEC(ZSTD(3)),
+    detection_date DateTime,
+    version        UInt64,
+    -- « tout ce qu'a produit la source X » : projection légère (positions
+    -- des lignes seulement, le payload n'est pas dupliqué)
+    PROJECTION p_source (SELECT _part_offset ORDER BY (id_source, node_type))
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY node_type
+-- une ligne par (nœud, source) : une nouvelle détection d'une même source
+-- remplace l'ancienne (dernière version), pas d'historique
+ORDER BY (node_type, id_node, id_source)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';

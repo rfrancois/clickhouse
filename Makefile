@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init migrate migrate-swap text-index upgrade generate test import pdf down clean
+.PHONY: all up wait init migrate migrate-swap migrate-ip migrate-ip-swap text-index upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -31,6 +31,13 @@ migrate:
 # Bascule vers la nouvelle table (ancienne gardée sous fqdn_search_old)
 migrate-swap:
 	$(CLIENT) < sql/08_migrate_swap.sql
+
+# Même migration pour ip_search (tri par valeur, sans index ngram)
+migrate-ip:
+	$(CLIENT) < sql/10_migrate_ip_copy.sql
+
+migrate-ip-swap:
+	$(CLIENT) < sql/11_migrate_ip_swap.sql
 
 # Ajout de l'index texte exact sur fqdn_search (sans copie, en arrière-plan)
 text-index:

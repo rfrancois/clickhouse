@@ -128,6 +128,22 @@ Retour arrière : `ALTER TABLE fqdn_search DROP INDEX idx_text;`
 
 Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
+### Table `ip_search`
+
+Même principe (projection `p_id`, rank 0 → 1 000 000), avec deux
+différences :
+- triée par valeur dans l'ordre **normal** (`ORDER BY (value, id_ip)`) : pour
+  une IP, c'est le préfixe qui regroupe (sous-réseau), donc
+  `LIKE '192.168.%'` passe par la clé primaire ;
+- **aucun index ngram/texte** : une IP n'a que des chiffres et des points,
+  les trigrammes sont présents dans presque tous les blocs, et l'index ne
+  filtre rien (testé : `LIKE '%8.8.8%'` en 112 ms avec, 45 ms sans).
+
+```bash
+make migrate-ip        # sql/10_migrate_ip_copy.sql : remplit ip_search_new, affiche les comptes
+make migrate-ip-swap   # sql/11_migrate_ip_swap.sql : bascule (ancienne → ip_search_old)
+```
+
 ## Résultats historiques (dans `results/`)
 
 Les benchmarks naïf vs optimisé qui ont justifié cette architecture sont

@@ -37,10 +37,16 @@ CREATE TABLE ip_search
     id_ip    Int32,
     rank     UInt32,
     version  UInt64,
-    INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1
+    -- pas d'index ngram/texte : une IP n'a que des chiffres et des points, les
+    -- trigrammes sont partout, l'index ne filtre rien (testé, plus lent avec)
+    -- recherche par id (jointure liens → IP) : projection légère
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_ip)
 )
 ENGINE = ReplacingMergeTree(version)
-ORDER BY (id_ip, value);
+-- tri par valeur (ordre normal) : un sous-réseau est contigu, donc
+-- LIKE '192.168.%' passe par la clé primaire
+ORDER BY (value, id_ip)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 -- 2) link avec ids TYPÉS (Int64) + projection inversée pour le sens inverse
 CREATE TABLE link_opt

@@ -106,6 +106,26 @@ Retour arrière : `EXCHANGE TABLES fqdn_search AND fqdn_search_old;`.
 Libérer le disque une fois satisfait :
 `DROP TABLE fqdn_search_old SETTINGS max_table_size_to_drop = 0;`
 
+### Index texte exact
+
+L'index ngram (filtre de Bloom) laisse passer beaucoup de faux positifs sur
+les vraies données : il garde ~73 % des blocs, alors que ~7 % contiennent le
+terme. L'index texte `idx_text` est exact. Essai sur 1/16 des données
+(`sql/test_text_index.sql`) : 9 051 → 1 656 blocs, 88 → 24 ms par
+recherche, mais ~30 Gio d'index par milliard de lignes.
+
+Base existante (sans copie, construction en arrière-plan, pas d'import
+pendant ce temps) :
+
+```bash
+make text-index   # = sql/09_add_text_index.sql
+```
+
+L'index ngram est gardé pour l'instant. Après un import réussi avec l'index
+texte (pas d'erreur mémoire), il peut être supprimé :
+`ALTER TABLE fqdn_search DROP INDEX idx_ngram;`
+Retour arrière : `ALTER TABLE fqdn_search DROP INDEX idx_text;`
+
 Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
 ## Résultats historiques (dans `results/`)

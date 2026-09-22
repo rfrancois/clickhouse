@@ -15,6 +15,10 @@ CREATE TABLE fqdn_search
     rank     UInt32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
+    -- index texte EXACT pour LIKE '%…%' : lit ~5x moins de blocs que le ngram
+    -- (probabiliste). Le ngram est gardé tant que les imports avec l'index
+    -- texte ne sont pas validés (cf. sql/09_add_text_index.sql)
+    INDEX idx_text value TYPE text(tokenizer = ngrams(3)),
     -- recherche par id (jointure FQDN → liens → IP) : projection légère
     -- (positions des lignes seulement), triée par id_fqdn
     PROJECTION p_id (SELECT _part_offset ORDER BY id_fqdn)

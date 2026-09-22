@@ -1,6 +1,8 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:latest
+    # Version figée : 'latest' restait bloqué sur l'image téléchargée la
+    # première fois (24.8), où la projection p_rank est ignorée pour ORDER BY.
+    image: clickhouse/clickhouse-server:26.7
     container_name: bench_clickhouse
     ports:
       - "8123:8123"   # HTTP

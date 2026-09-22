@@ -13,6 +13,11 @@
 -- et s'arrête dès qu'il a N lignes qui matchent le LIKE.
 --
 -- Sans perte de données, sans recréer la table. Relançable sans risque.
+--
+-- ⚠️ VERSION : ClickHouse >= 25.x requis pour que la projection serve au tri.
+--    Vérifié : 26.7 → utilisée ; 24.8 → ignorée (elle n'y sert qu'aux filtres
+--    sur sa clé), aucun gain. Mettre à jour : make upgrade
+--    Contrôle : EXPLAIN <requête> doit afficher « ReadFromMergeTree (p_rank) ».
 -- Coût : ~ la taille de fqdn_search en disque en plus, inserts un peu plus lents.
 
 -- 1) OBLIGATOIRE avant d'ajouter la projection sur un ReplacingMergeTree :

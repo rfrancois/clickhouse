@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init migrate generate test import pdf down clean
+.PHONY: all up wait init migrate upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -16,6 +16,13 @@ wait:
 init:
 	$(CLIENT) < sql/02_optimized.sql
 	@echo "Schéma optimisé créé."
+
+# Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
+upgrade:
+	docker compose pull
+	docker compose up -d
+	@$(MAKE) --no-print-directory wait
+	@docker exec bench_clickhouse clickhouse-client --user bench --password bench -q "SELECT 'ClickHouse ' || version()"
 
 # Mise à jour d'une base existante (sans perte) : projection p_rank pour ORDER BY rank
 migrate:

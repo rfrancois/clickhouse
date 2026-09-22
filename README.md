@@ -1,6 +1,6 @@
 # Banc d'essai ClickHouse — schéma optimisé (application de SOLUTION.md)
 
-Stack : ClickHouse 24.8 en Docker + scripts Python (venv local).
+Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 
 - **Données factices** (optionnelles, pour tester) : 500 000 FQDN,
   500 000 IP, 1 000 000 liens (2 % des FQDN contiennent des "hot terms" :
@@ -104,6 +104,11 @@ FROM system.mutations WHERE table = 'fqdn_search' AND NOT is_done;
 ```
 
 À savoir :
+- **ClickHouse récent requis** : en 24.8 la projection est ignorée pour un
+  `ORDER BY` (aucun gain). Vérifié en 26.7, la version figée dans
+  `docker-compose.yml`. Mise à jour : `make upgrade` (le volume est conservé ;
+  pas de retour possible vers 24.8 ensuite, sauvegarder avant si besoin).
+  Contrôle : `EXPLAIN SELECT ...` doit afficher `ReadFromMergeTree (p_rank)` ;
 - garder un `LIMIT` : sans lui, toutes les lignes qui matchent doivent être
   triées, aucune structure ne peut l'éviter ;
 - pour un terme **très rare**, la projection lit toute la colonne (elle n'a

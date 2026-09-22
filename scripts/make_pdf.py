@@ -67,7 +67,7 @@ story = [
     Paragraph("3. Ce qui a été fait concrètement", H2),
     Paragraph(
         "• Trois tables optimisées : <b>fqdn_search</b> (domaines), <b>ip_search</b> "
-        "(adresses IP) et <b>link_opt</b> (liens entre eux).", PUCE),
+        "(adresses IP) et <b>link</b> (liens typés entre eux).", PUCE),
     Paragraph(
         "• Un <b>import en une seule commande</b> : on dépose un fichier zip et tout "
         "est automatique (extraction, chargement, rangement dans les bonnes tables). "

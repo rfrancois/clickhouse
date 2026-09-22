@@ -5,7 +5,7 @@ Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 - **Données factices** (optionnelles, pour tester) : 500 000 FQDN,
   500 000 IP, 1 000 000 liens (2 % des FQDN contiennent des "hot terms" :
   youtube, shop, bank, mail…).
-- **Schéma de production** : `fqdn_search` / `ip_search` / `link_opt`
+- **Schéma de production** : `fqdn_search` / `ip_search` / `link`
   (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, projection
   inversée, `ReplacingMergeTree(version)`).
 
@@ -37,7 +37,7 @@ Fichiers reconnus (classification par nom) :
 | Fichier | Format | Destination |
 |---|---|---|
 | `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | `fqdn_search` / `ip_search` selon `type` |
-| `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link_opt` |
+| `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn_search` (cn + dns), `ip_search` |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
@@ -142,6 +142,31 @@ différences :
 ```bash
 make migrate-ip        # sql/10_migrate_ip_copy.sql : remplit ip_search_new, affiche les comptes
 make migrate-ip-swap   # sql/11_migrate_ip_swap.sql : bascule (ancienne → ip_search_old)
+```
+
+### Migration de `link_opt` vers `link` (liens typés)
+
+`link_opt` ne stockait que deux ids, sans savoir si chaque extrémité était
+un FQDN ou une IP (les ids ne sont uniques qu'à l'intérieur d'un type). La
+table `link` porte le type de chaque extrémité :
+
+- `(type_1, id_1, type_2, id_2)`, types en `Enum8` (`application`,
+  `capture`, `fqdn`, `ip`, `plugin`, `organization_name`,
+  `organization_id`, `phone`, `social_id`) ; un nouveau type s'ajoute à la
+  fin des deux `Enum8` (métadonnées seules) ;
+- une seule table pour tous les couples de types : tri
+  `(type_1, id_1, type_2, id_2)` + projection inverse
+  `(type_2, id_2, type_1, id_1)`, `PARTITION BY type_1` ;
+- projection en `deduplicate_merge_projection_mode = 'rebuild'` (avec
+  `'drop'`, les fusions supprimaient la projection inverse).
+
+La migration considère **tout le contenu de `link_opt` comme fqdn ↔ fqdn**.
+Les liens qui étaient en réalité fqdn ↔ ip sont à réimporter pour être
+correctement typés.
+
+```bash
+make migrate-link        # sql/12_migrate_link_copy.sql : remplit link, affiche les comptes
+make migrate-link-swap   # sql/13_migrate_link_swap.sql : link_opt → link_opt_old
 ```
 
 ## Résultats historiques (dans `results/`)

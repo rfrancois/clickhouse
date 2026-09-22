@@ -5,7 +5,7 @@
   agrégés par blocs contigus de 10k ids (distribution réaliste d'un crawl)
   pour que les recherches LIKE '%term%' retournent un volume réaliste.
 - value = String (une valeur par ligne, comme les données réelles).
-- Les liens relient des id_fqdn à des id_ip (ids Int64, schéma link_opt).
+- Les liens relient des id_fqdn à des id_ip (ids Int64, table link typée).
 """
 import random
 import ipaddress
@@ -76,24 +76,24 @@ def main() -> None:
         client.insert("ip_search", rows,
                       column_names=["value", "id_ip", "rank", "version"])
 
-    # ---------- LINKS (fqdn -> ip, ids Int64) ----------
+    # ---------- LINKS (fqdn -> ip, typés, ids Int64) ----------
     print(f"[3/3] Génération de {N_LINKS:,} liens...")
     now = 1_700_000_000
     rows = []
     for i in range(N_LINKS):
-        rows.append((rng.randint(1, N_FQDN), rng.randint(1, N_IP),
+        rows.append(("fqdn", rng.randint(1, N_FQDN), "ip", rng.randint(1, N_IP),
                      rng.randint(1, 100), now - rng.randint(0, 31_536_000), 1))
         if len(rows) >= BATCH:
-            client.insert("link_opt", rows,
-                          column_names=["id_node_1", "id_node_2", "source_id",
-                                        "detection_date", "version"])
+            client.insert("link", rows,
+                          column_names=["type_1", "id_1", "type_2", "id_2",
+                                        "source_id", "detection_date", "version"])
             rows.clear()
     if rows:
-        client.insert("link_opt", rows,
-                      column_names=["id_node_1", "id_node_2", "source_id",
-                                    "detection_date", "version"])
+        client.insert("link", rows,
+                      column_names=["type_1", "id_1", "type_2", "id_2",
+                                    "source_id", "detection_date", "version"])
 
-    for t in ("fqdn_search", "ip_search", "link_opt"):
+    for t in ("fqdn_search", "ip_search", "link"):
         n = client.command(f"SELECT count() FROM {t}")
         print(f"  {t}: {n:,} lignes")
     print("OK — données chargées dans les tables optimisées.")

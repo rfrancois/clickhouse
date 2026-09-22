@@ -4,7 +4,7 @@
 
 DROP TABLE IF EXISTS fqdn_search;
 DROP TABLE IF EXISTS ip_search;
-DROP TABLE IF EXISTS link_opt;
+DROP TABLE IF EXISTS link;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :
 --    c'est l'index qui fait toute la différence, pas un changement de format
@@ -48,20 +48,40 @@ ENGINE = ReplacingMergeTree(version)
 ORDER BY (value, id_ip)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
--- 2) link avec ids TYPÉS (Int64) + projection inversée pour le sens inverse
-CREATE TABLE link_opt
+-- 2) link : une seule table pour tous les couples d'entités, TYPÉS.
+--    Les ids ne sont uniques qu'à l'intérieur d'un type (id_fqdn = 42 et
+--    id_ip = 42 coexistent) : (type, id) identifie un nœud, pas l'id seul.
+--    Nouveau type d'entité → ajouter la valeur À LA FIN des deux Enum8
+--    (ALTER ... MODIFY COLUMN, métadonnées seules, aucune réécriture).
+CREATE TABLE link
 (
-    id_node_1      Int64,
-    id_node_2      Int64,
+    type_1         Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
+                         'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
+                         'phone' = 8, 'social_id' = 9),
+    id_1           Int64,
+    type_2         Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
+                         'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
+                         'phone' = 8, 'social_id' = 9),
+    id_2           Int64,
     source_id      Int32,
     detection_date UInt64,
     version        UInt64,
+    -- sens inverse (voisins de l'extrémité 2) : même données, autre tri
     PROJECTION p_reverse
     (
-        SELECT id_node_2, id_node_1, source_id, detection_date, version
-        ORDER BY (id_node_2, id_node_1)
+        SELECT type_2, id_2, type_1, id_1, source_id, detection_date, version
+        ORDER BY (type_2, id_2, type_1, id_1)
     )
 )
 ENGINE = ReplacingMergeTree(version)
-ORDER BY (id_node_1, id_node_2)
-SETTINGS deduplicate_merge_projection_mode = 'drop';
+-- une partition par type de l'extrémité 1 : suppression / réimport d'un type
+-- entier par ALTER TABLE link DROP PARTITION 'xxx'
+PARTITION BY type_1
+-- index primaire (en RAM) réduit à ce qu'on filtre vraiment ; le tri complet
+-- reste la clé de déduplication (un couple = une ligne)
+PRIMARY KEY (type_1, id_1)
+ORDER BY (type_1, id_1, type_2, id_2)
+-- 'rebuild' et non 'drop' : avec 'drop', chaque fusion de dédoublonnage
+-- supprime p_reverse de la part fusionnée → le sens inverse retombe en scan
+-- complet au fil des merges
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';

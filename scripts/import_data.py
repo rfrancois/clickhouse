@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Import de fichiers réels vers les tables optimisées
-(fqdn_search / ip_search / link_opt — les tables naïves ne sont plus alimentées).
+(fqdn_search / ip_search / link — les tables naïves ne sont plus alimentées).
 
 Usage : make import FILE=<archive.zip | fichier | dossier>
 
@@ -20,9 +20,9 @@ tient le milliard de lignes) :
   5. distribution vers les tables optimisées :
      - node.csv / domains.json → fqdn_search / ip_search
        (sql/05_import_distribute.sql)
-     - domains.json → link_opt : liens cn ↔ dns et cn ↔ ip, ids = hash de la
+     - domains.json → link (typée) : liens cn ↔ dns et cn ↔ ip, ids = hash de la
        valeur, insert direct sans jointure (sql/05_import_distribute.sql)
-     - liens CSV : résolution valeur → id puis stg_link → link_opt, en N
+     - liens CSV : résolution valeur → id puis stg_link → link, en N
        tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste)
 """
 import os
@@ -88,13 +88,13 @@ def run_sql_file(path: Path) -> None:
 
 
 def distribute_links(n: int = LINK_SLICES) -> None:
-    """Résout stg_link → link_opt en N tranches (empreinte mémoire bornée).
+    """Résout stg_link → link en N tranches (empreinte mémoire bornée).
 
     Tranche par cityHash64 : pour la tranche k on ne traite que les valeurs de
     nœuds (resp. les liens) dont le hash % n == k. Aucune requête ne voit donc
     plus de 1/n des données à la fois.
     """
-    log(f"Résolution des liens → link_opt en {n} tranches...")
+    log(f"Résolution des liens → link en {n} tranches...")
     for t in ("fqdn_search", "ip_search", "stg_link"):
         log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
 
@@ -132,9 +132,9 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     t = time.monotonic()
     for k in range(n):
         query(
-            "INSERT INTO link_opt "
-            "(id_node_1, id_node_2, source_id, detection_date, version) "
-            "SELECT n1.id, n2.id, toInt32OrZero(l.id_source), "
+            "INSERT INTO link "
+            "(type_1, id_1, type_2, id_2, source_id, detection_date, version) "
+            "SELECT l.t1, n1.id, l.t2, n2.id, toInt32OrZero(l.id_source), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
             "FROM (SELECT id_node_1, id_node_2, id_source, creation_date, update_date, "
@@ -319,7 +319,7 @@ def main() -> None:
             "SELECT * FROM ("
             "SELECT 'fqdn_search' AS tbl, count() AS n FROM fqdn_search UNION ALL "
             "SELECT 'ip_search', count() FROM ip_search UNION ALL "
-            "SELECT 'link_opt', count() FROM link_opt"
+            "SELECT 'link', count() FROM link"
             ") ORDER BY tbl FORMAT PrettyCompactMonoBlock")
         log(counts)
         log(f"\nImport terminé en {time.monotonic() - t0:.0f} s "

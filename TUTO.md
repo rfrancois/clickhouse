@@ -21,7 +21,7 @@ make import FILE=archive.zip   # zip contenant *node*.csv / *link*.csv / *.json[
 ```
 
 Les données sont chargées en staging puis distribuées dans les tables
-optimisées (`fqdn_search`, `ip_search`, `link_opt`). Pas besoin d'avoir
+optimisées (`fqdn_search`, `ip_search`, `link`). Pas besoin d'avoir
 lancé `make init` au préalable : si les tables optimisées sont absentes,
 le schéma est créé automatiquement au début de l'import. La résolution
 des liens (valeur → id) utilise `grace_hash` pour ne pas saturer la

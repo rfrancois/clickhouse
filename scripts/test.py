@@ -29,9 +29,10 @@ JOIN_QUERY = f"""
 SELECT DISTINCT ip.id_ip, ip.value
 FROM ip_search AS ip
 WHERE ip.id_ip IN (
-    SELECT l.id_node_2
-    FROM link_opt AS l
-    WHERE l.id_node_1 IN (
+    SELECT l.id_2
+    FROM link AS l
+    WHERE l.type_1 = 'fqdn' AND l.type_2 = 'ip'
+      AND l.id_1 IN (
         SELECT DISTINCT f.id_fqdn
         FROM fqdn_search AS f
         WHERE f.value LIKE '%{TERM}%'

@@ -36,27 +36,29 @@ ORDER BY (reverse(value), id_fqdn)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 -- Copie en 16 tranches (mémoire bornée, progression visible).
+-- positiveModulo et non % : id_fqdn peut être négatif, et -5 % 16 = -5 ne
+-- tomberait dans aucune tranche (lignes perdues).
 -- rank = 0 (pas de rank, ex. domains.json) devient 1 000 000 : ces lignes
 -- passent en fin de ORDER BY rank au lieu d'arriver en premier.
 SET max_threads = 8;
 SET max_memory_usage = 11000000000;
 SET use_skip_indexes = 0;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 0;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 1;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 2;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 3;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 4;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 5;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 6;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 7;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 8;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 9;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 10;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 11;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 12;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 13;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 14;
-INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE id_fqdn % 16 = 15;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 0;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 1;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 2;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 3;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 4;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 5;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 6;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 7;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 8;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 9;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 10;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 11;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 12;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 13;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 14;
+INSERT INTO fqdn_search_new SELECT value, id_fqdn, if(rank = 0, 1000000, rank), version FROM fqdn_search WHERE positiveModulo(id_fqdn, 16) = 15;
 
 -- Contrôle : les deux nombres de lignes doivent être égaux (ou « new » un peu
 -- plus petit si des doublons ont déjà été fusionnés). Si « new » est plus

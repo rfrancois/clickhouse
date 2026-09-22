@@ -2,8 +2,8 @@
 -- DIAGNOSTIC — lenteur de ... LIKE '%google.com%' ORDER BY rank LIMIT 500
 -- ============================================================
 -- Lecture seule : ne modifie rien. Durée : quelques dizaines de secondes.
--- Lancement (PowerShell, depuis le dossier du projet) :
---   Get-Content sql\diag_rank.sql -Raw | docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery --echo --format PrettyCompactMonoBlock 2>&1 | Out-File -Encoding utf8 diag_rank.txt
+-- Lancement (Linux, depuis le dossier du projet) :
+--   docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery --echo --format PrettyCompactMonoBlock < sql/diag_rank.sql > diag_rank.txt 2>&1
 -- Puis envoyer diag_rank.txt.
 
 -- 1) Serveur
@@ -20,9 +20,10 @@ SELECT create_table_query FROM system.tables
 WHERE database = currentDatabase() AND name = 'fqdn_search' FORMAT Vertical;
 SELECT count() AS parts, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS disk
 FROM system.parts WHERE database = currentDatabase() AND table = 'fqdn_search' AND active;
-SELECT count() AS parts_avec_p_rank, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS disk
+SELECT name AS projection, count() AS parts, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS disk
 FROM system.projection_parts
-WHERE database = currentDatabase() AND table = 'fqdn_search' AND name = 'p_rank' AND active;
+WHERE database = currentDatabase() AND table = 'fqdn_search' AND active
+GROUP BY name;
 SELECT command, parts_to_do, is_done, latest_fail_reason
 FROM system.mutations WHERE database = currentDatabase() AND table = 'fqdn_search'
 ORDER BY create_time DESC LIMIT 5;

@@ -53,9 +53,12 @@ Choix d'import :
   tronqué, `rank = 1000000`, `version = now()` ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
   chaque extrémité (`type_1` / `type_2` = `fqdn` | `ip`) : résolution
-  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`. Un
-  lien dont une extrémité est inconnue de ces tables est ignoré (jointure
-  INNER) et compté dans `liens_ignores_noeud_inconnu` pendant l'import.
+  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`. Une
+  extrémité fqdn/ip inconnue de ces tables est **créée** (même id synthétique
+  `cityHash64` tronqué et `rank = 1000000` que pour `domains.json`) avant la
+  jointure, plutôt que d'être ignorée. Seuls les autres types (`application`,
+  `plugin`, ...), qui n'ont pas de table de valeurs, restent ignorés et
+  comptés dans `liens_ignores_noeud_inconnu` pendant l'import.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
 - `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de

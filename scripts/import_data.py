@@ -23,7 +23,9 @@ tient le milliard de lignes) :
      - domains.json → link (typée) : liens cn ↔ dns et cn ↔ ip, ids = hash de la
        valeur, insert direct sans jointure (sql/05_import_distribute.sql)
      - liens CSV : résolution valeur → id puis stg_link → link, en N
-       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste)
+       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste) ;
+       les fqdn/ip référencés mais absents sont créés (id synthétique, rank
+       1000000) plutôt que d'ignorer le lien
 """
 import os
 import shutil
@@ -93,6 +95,12 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     Tranche par cityHash64 : pour la tranche k on ne traite que les valeurs de
     nœuds (resp. les liens) dont le hash % n == k. Aucune requête ne voit donc
     plus de 1/n des données à la fois.
+
+    Les extrémités fqdn/ip absentes de fqdn_search/ip_search sont créées
+    (même formule d'id synthétique que pour domains.json : cityHash64 tronqué
+    à 31 bits, rank = 1000000) plutôt que d'être ignorées. Les autres types
+    (application, plugin, ...) n'ont pas de table de valeurs et restent
+    ignorés si inconnus.
     """
     log(f"Résolution des liens → link en {n} tranches...")
     for t in ("fqdn_search", "ip_search", "stg_link"):
@@ -127,6 +135,32 @@ def distribute_links(n: int = LINK_SLICES) -> None:
                 f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k}) "
                 "GROUP BY value", mem=True)
     log(f"  correspondance valeur → id construite en {time.monotonic() - t:.0f} s")
+
+    # 3a bis — crée les fqdn/ip cités par les liens mais absents des tables
+    # optimisées (même formule d'id que domains.json), puis les ajoute à
+    # tmp_node_map pour qu'ils soient résolus comme les nœuds existants.
+    avant = int(query("SELECT count() FROM tmp_node_map"))
+    t = time.monotonic()
+    for k in range(n):
+        for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
+                                ("ip", "ip_search", "id_ip")):
+            query(
+                f"INSERT INTO {tbl} (value, {idcol}, rank, version) "
+                "SELECT value, toInt32(bitAnd(cityHash64(value), 0x7FFFFFFF)), "
+                "1000000, toUnixTimestamp(now()) FROM tmp_link_values "
+                f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k} "
+                "AND value NOT IN (SELECT value FROM tmp_node_map "
+                f"WHERE node_type = '{typ}')", mem=True)
+            query(
+                f"INSERT INTO tmp_node_map SELECT '{typ}', value, "
+                "toInt64(bitAnd(cityHash64(value), 0x7FFFFFFF)) "
+                "FROM tmp_link_values "
+                f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k} "
+                "AND value NOT IN (SELECT value FROM tmp_node_map "
+                f"WHERE node_type = '{typ}')", mem=True)
+    crees = int(query("SELECT count() FROM tmp_node_map")) - avant
+    log(f"  {crees:,} nœuds fqdn/ip créés (absents de fqdn_search/ip_search) "
+        f"en {time.monotonic() - t:.0f} s")
 
     # 3b — réécriture des liens avec les ids, tranche par tranche.
     t = time.monotonic()

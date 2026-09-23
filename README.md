@@ -3,11 +3,12 @@
 Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 
 - **Données factices** (optionnelles, pour tester) : 500 000 FQDN,
-  500 000 IP, 1 000 000 liens (2 % des FQDN contiennent des "hot terms" :
+  500 000 IP, 1 000 000 liens = 2 000 000 lignes dans `link` (chaque lien est
+  inséré dans les deux sens, 2 % des FQDN contiennent des "hot terms" :
   youtube, shop, bank, mail…).
 - **Schéma de production** : `fqdn_search` / `ip_search` / `link`
-  (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, projection
-  inversée, `ReplacingMergeTree(version)`).
+  (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, liens
+  dupliqués dans les deux sens, `ReplacingMergeTree(version)`).
 
 ## Commandes
 
@@ -61,6 +62,8 @@ Choix d'import :
   comptés dans `liens_ignores_noeud_inconnu` pendant l'import.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
+  chaque lien résolu est inséré dans `link` **dans les deux sens** (voir la
+  section "Migration de `link_opt` vers `link`" plus bas pour le détail) ;
 - `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
   `ORDER BY rank`) ; `make migrate` applique la même règle aux données existantes ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
@@ -157,19 +160,34 @@ table `link` porte le type de chaque extrémité :
   `capture`, `fqdn`, `ip`, `plugin`, `organization_name`,
   `organization_id`, `phone`, `social_id`) ; un nouveau type s'ajoute à la
   fin des deux `Enum8` (métadonnées seules) ;
-- une seule table pour tous les couples de types : tri
-  `(type_1, id_1, type_2, id_2)` + projection inverse
-  `(type_2, id_2, type_1, id_1)`, `PARTITION BY type_1` ;
-- projection en `deduplicate_merge_projection_mode = 'rebuild'` (avec
-  `'drop'`, les fusions supprimaient la projection inverse).
+- une seule table pour tous les couples de types, triée
+  `(type_1, id_1, type_2, id_2)`, `PARTITION BY type_1` ;
+- **pas de projection inverse** : chaque lien est inséré physiquement dans
+  les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
+  `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
+  Un simple filtre `type_1 = ... AND id_1 = ...` retrouve donc les voisins
+  des deux côtés, sans `UNION`. Coût disque équivalent à l'ancienne
+  projection (qui dupliquait déjà les mêmes colonnes) ; en contrepartie,
+  toute écriture sur `link` (update, suppression) doit traiter les deux
+  lignes ensemble pour rester cohérente — rien ne les garde plus
+  synchronisées automatiquement.
 
-La migration considère **tout le contenu de `link_opt` comme fqdn ↔ fqdn**.
-Les liens qui étaient en réalité fqdn ↔ ip sont à réimporter pour être
-correctement typés.
+La migration considère **tout le contenu de `link_opt` comme fqdn ↔ fqdn**
+et écrit les deux sens. Les liens qui étaient en réalité fqdn ↔ ip sont à
+réimporter pour être correctement typés.
 
 ```bash
-make migrate-link        # sql/12_migrate_link_copy.sql : remplit link, affiche les comptes
+make migrate-link        # sql/12_migrate_link_copy.sql : remplit link (2 sens), affiche les comptes
 make migrate-link-swap   # sql/13_migrate_link_swap.sql : link_opt → link_opt_old
+```
+
+Base dont `link` existe déjà mais à **sens unique** (schéma d'avant cette
+migration, avec projection `p_reverse`) : ajoute le sens manquant puis
+supprime la projection, devenue inutile. À lancer une seule fois, import et
+génération arrêtés pendant ce temps.
+
+```bash
+make migrate-link-bidir   # sql/15_migrate_link_bidirectional.sql
 ```
 
 ### Table `property` (informations par nœud et par source)

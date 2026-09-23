@@ -21,11 +21,17 @@ tient le milliard de lignes) :
      - node.csv / domains.json → fqdn_search / ip_search
        (sql/05_import_distribute.sql)
      - domains.json → link (typée) : liens cn ↔ dns et cn ↔ ip, ids = hash de la
-       valeur, insert direct sans jointure (sql/05_import_distribute.sql)
+       valeur, insert direct sans jointure, DANS LES DEUX SENS
+       (sql/05_import_distribute.sql)
      - liens CSV : résolution valeur → id puis stg_link → link, en N
-       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste) ;
-       les fqdn/ip référencés mais absents sont créés (id synthétique, rank
-       1000000) plutôt que d'ignorer le lien
+       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste),
+       DANS LES DEUX SENS ; les fqdn/ip référencés mais absents sont créés
+       (id synthétique, rank 1000000) plutôt que d'ignorer le lien
+
+link n'a pas de projection inverse : chaque lien est physiquement dupliqué
+(A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
+dans les deux sens. Toute future écriture sur link (update, suppression) doit
+donc traiter les deux lignes ensemble pour rester cohérente.
 """
 import os
 import shutil
@@ -101,6 +107,9 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     à 31 bits, rank = 1000000) plutôt que d'être ignorées. Les autres types
     (application, plugin, ...) n'ont pas de table de valeurs et restent
     ignorés si inconnus.
+
+    Chaque lien résolu est inséré dans les deux sens (pas de projection
+    inverse sur link, cf. 02_optimized.sql).
     """
     log(f"Résolution des liens → link en {n} tranches...")
     for t in ("fqdn_search", "ip_search", "stg_link"):
@@ -162,22 +171,33 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     log(f"  {crees:,} nœuds fqdn/ip créés (absents de fqdn_search/ip_search) "
         f"en {time.monotonic() - t:.0f} s")
 
-    # 3b — réécriture des liens avec les ids, tranche par tranche.
+    # 3b — réécriture des liens avec les ids, tranche par tranche. Table link
+    # sans projection inverse (cf. 02_optimized.sql) : chaque lien résolu est
+    # inséré dans les DEUX sens (n1→n2 et n2→n1).
     t = time.monotonic()
     for k in range(n):
+        base = (
+            "FROM (SELECT id_node_1, id_node_2, id_source, creation_date, update_date, "
+            "lower(type_1) AS t1, lower(type_2) AS t2 FROM stg_link "
+            f"WHERE cityHash64(id_node_1, id_node_2) % {n} = {k}) AS l "
+            "INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1 "
+            "INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2"
+        )
         query(
             "INSERT INTO link "
             "(type_1, id_1, type_2, id_2, source_id, detection_date, version) "
             "SELECT l.t1, n1.id, l.t2, n2.id, toInt32OrZero(l.id_source), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
-            "FROM (SELECT id_node_1, id_node_2, id_source, creation_date, update_date, "
-            "lower(type_1) AS t1, lower(type_2) AS t2 FROM stg_link "
-            f"WHERE cityHash64(id_node_1, id_node_2) % {n} = {k}) AS l "
-            "INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1 "
-            "INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2",
-            mem=True)
-    log(f"  liens réécrits en {time.monotonic() - t:.0f} s")
+            + base, mem=True)
+        query(
+            "INSERT INTO link "
+            "(type_1, id_1, type_2, id_2, source_id, detection_date, version) "
+            "SELECT l.t2, n2.id, l.t1, n1.id, toInt32OrZero(l.id_source), "
+            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
+            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
+            + base, mem=True)
+    log(f"  liens réécrits (2 sens) en {time.monotonic() - t:.0f} s")
 
     staged = int(query("SELECT count() FROM stg_link"))
     resolus = int(query(

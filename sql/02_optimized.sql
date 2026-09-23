@@ -54,6 +54,14 @@ SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 --    id_ip = 42 coexistent) : (type, id) identifie un nœud, pas l'id seul.
 --    Nouveau type de nœud → ajouter la valeur À LA FIN des deux Enum8
 --    (ALTER ... MODIFY COLUMN, métadonnées seules, aucune réécriture).
+--    Chaque lien est inséré DEUX FOIS (A→B et B→A, cf. sql/05_import_distribute.sql
+--    et distribute_links() dans scripts/import_data.py) : un simple filtre sur
+--    (type_1, id_1) retrouve les voisins dans les deux sens, sans projection ni
+--    UNION à la lecture. Pas de projection inverse ici : dupliquer la ligne
+--    coûte à peu près la même place disque qu'une projection qui recopiait déjà
+--    toutes les colonnes triées dans l'autre sens — la contrepartie est que
+--    l'import doit toujours écrire les deux lignes ensemble (ClickHouse ne les
+--    garde plus synchronisées automatiquement).
 CREATE TABLE link
 (
     type_1         Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
@@ -66,26 +74,17 @@ CREATE TABLE link
     id_2           Int64,
     source_id      Int32,
     detection_date UInt64,
-    version        UInt64,
-    -- sens inverse (voisins de l'extrémité 2) : même données, autre tri
-    PROJECTION p_reverse
-    (
-        SELECT type_2, id_2, type_1, id_1, source_id, detection_date, version
-        ORDER BY (type_2, id_2, type_1, id_1)
-    )
+    version        UInt64
 )
 ENGINE = ReplacingMergeTree(version)
 -- une partition par type de l'extrémité 1 : suppression / réimport d'un type
 -- entier par ALTER TABLE link DROP PARTITION 'xxx'
 PARTITION BY type_1
 -- index primaire (en RAM) réduit à ce qu'on filtre vraiment ; le tri complet
--- reste la clé de déduplication (un couple = une ligne)
+-- reste la clé de déduplication (un couple ORIENTÉ = une ligne ; A→B et B→A
+-- sont deux lignes distinctes, dédupliquées chacune de son côté)
 PRIMARY KEY (type_1, id_1)
-ORDER BY (type_1, id_1, type_2, id_2)
--- 'rebuild' et non 'drop' : avec 'drop', chaque fusion de dédoublonnage
--- supprime p_reverse de la part fusionnée → le sens inverse retombe en scan
--- complet au fil des merges
-SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+ORDER BY (type_1, id_1, type_2, id_2);
 
 -- 3) property : les informations (payload) de chaque nœud, par source.
 --    (node_type, id_node) identifie le nœud, comme dans link.

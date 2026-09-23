@@ -74,8 +74,8 @@ WHERE ip IS NOT NULL AND ip != '';
 -- ---------- 2b) domains.json → liens cn ↔ dns et cn ↔ ip ----------
 -- link ne stocke que (type, id) : on recalcule l'id synthétique de chaque
 -- extrémité par le même hash qu'en section 2 (aucune jointure, insert direct).
--- Le cn est toujours l'extrémité 1 ; la projection inverse de link couvre
--- l'autre sens. Auto-liens (dns == cn) filtrés.
+-- Table link sans projection inverse (cf. 02_optimized.sql) : chaque lien est
+-- inséré dans les DEUX sens (cn→d et d→cn). Auto-liens (dns == cn) filtrés.
 
 -- cn ─ dns  (fqdn ↔ fqdn)
 INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
@@ -90,12 +90,35 @@ FROM (SELECT cn, arrayJoin(dns) AS d FROM stg_domain
       WHERE cn IS NOT NULL AND cn != '')
 WHERE d IS NOT NULL AND d != '' AND d != cn;
 
+INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
+SELECT 'fqdn',
+       toInt64(bitAnd(cityHash64(d), 0x7FFFFFFF)),
+       'fqdn',
+       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
+       0,
+       toUnixTimestamp(now()),
+       toUnixTimestamp(now())
+FROM (SELECT cn, arrayJoin(dns) AS d FROM stg_domain
+      WHERE cn IS NOT NULL AND cn != '')
+WHERE d IS NOT NULL AND d != '' AND d != cn;
+
 -- cn ─ ip  (fqdn ↔ ip)
 INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
 SELECT 'fqdn',
        toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
        'ip',
        toInt64(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
+       0,
+       toUnixTimestamp(now()),
+       toUnixTimestamp(now())
+FROM stg_domain
+WHERE cn IS NOT NULL AND cn != '' AND ip IS NOT NULL AND ip != '';
+
+INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
+SELECT 'ip',
+       toInt64(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
+       'fqdn',
+       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
        0,
        toUnixTimestamp(now()),
        toUnixTimestamp(now())

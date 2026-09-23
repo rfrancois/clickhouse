@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Génère 500k FQDN, 500k IP et 1M liens factices dans les tables optimisées.
+"""Génère 500k FQDN, 500k IP et 1M liens factices (2M lignes dans link, un
+lien = deux lignes fqdn->ip et ip->fqdn) dans les tables optimisées.
 
 - 2% des FQDN contiennent des "hot terms" (youtube, shop, bank, mail...),
   agrégés par blocs contigus de 10k ids (distribution réaliste d'un crawl)
   pour que les recherches LIKE '%term%' retournent un volume réaliste.
 - value = String (une valeur par ligne, comme les données réelles).
-- Les liens relient des id_fqdn à des id_ip (ids Int64, table link typée).
+- Les liens relient des id_fqdn à des id_ip (ids Int64, table link typée),
+  insérés dans les deux sens (link n'a pas de projection inverse).
 """
 import random
 import ipaddress
@@ -76,13 +78,20 @@ def main() -> None:
         client.insert("ip_search", rows,
                       column_names=["value", "id_ip", "rank", "version"])
 
-    # ---------- LINKS (fqdn -> ip, typés, ids Int64) ----------
+    # ---------- LINKS (fqdn <-> ip, typés, ids Int64) ----------
+    # link n'a pas de projection inverse (cf. sql/02_optimized.sql) : chaque
+    # lien est inséré dans les deux sens, comme le fait le pipeline d'import
+    # réel (distribute_links). 2 lignes par lien généré.
     print(f"[3/3] Génération de {N_LINKS:,} liens...")
     now = 1_700_000_000
     rows = []
     for i in range(N_LINKS):
-        rows.append(("fqdn", rng.randint(1, N_FQDN), "ip", rng.randint(1, N_IP),
-                     rng.randint(1, 100), now - rng.randint(0, 31_536_000), 1))
+        id_fqdn = rng.randint(1, N_FQDN)
+        id_ip = rng.randint(1, N_IP)
+        source_id = rng.randint(1, 100)
+        detection_date = now - rng.randint(0, 31_536_000)
+        rows.append(("fqdn", id_fqdn, "ip", id_ip, source_id, detection_date, 1))
+        rows.append(("ip", id_ip, "fqdn", id_fqdn, source_id, detection_date, 1))
         if len(rows) >= BATCH:
             client.insert("link", rows,
                           column_names=["type_1", "id_1", "type_2", "id_2",

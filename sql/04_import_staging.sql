@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS stg_node;
 DROP TABLE IF EXISTS stg_link;
 DROP TABLE IF EXISTS stg_domain;
 DROP TABLE IF EXISTS stg_value;
+DROP TABLE IF EXISTS stg_property;
 
 -- node.csv : id;value;type;creation_date;rank  (séparateur ';', champs quotés)
 CREATE TABLE stg_node
@@ -34,6 +35,23 @@ CREATE TABLE stg_link
     id_source     String,
     creation_date String,
     update_date   String
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+-- properties.csv : id_node;type;id_source;payload;version;detection_date
+-- id_node est un ID numérique (même id que <type>.id_<type>), pas une valeur :
+-- aucune résolution, distribution directe vers property (distribute_properties).
+-- Champs entre guillemets, guillemets internes échappés par backslash (\")
+-- → chargé en CustomSeparated avec la règle d'échappement JSON, pas en CSV.
+CREATE TABLE stg_property
+(
+    id_node        String,
+    node_type      String,
+    id_source      String,
+    payload        String,
+    version        String,
+    detection_date String
 )
 ENGINE = MergeTree
 ORDER BY tuple();

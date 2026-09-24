@@ -40,6 +40,7 @@ Fichiers reconnus (classification par nom) :
 |---|---|---|
 | `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | table du `type` (`fqdn`, `ip`, `application`, ...) |
 | `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
+| `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
@@ -72,6 +73,14 @@ Choix d'import :
   section "Table `link`" plus bas pour le détail) ;
 - `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
   `ORDER BY rank`) ;
+- `properties.csv` référence les nœuds par leur **id** (pas par valeur) :
+  insertion directe dans `property`, sans résolution ni vérification que le
+  nœud existe. Ses guillemets internes sont échappés par backslash (`\"`,
+  export MySQL), ce que le format CSV de ClickHouse ne lit pas : le fichier
+  est chargé en `CustomSeparatedWithNames` avec la règle d'échappement
+  `JSON` (fins de ligne `\r\n` acceptées). `version` → timestamp Unix ;
+  `detection_date` vide ou à la date zéro MySQL (`0000-00-00 00:00:00`)
+  → date de `version` ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
   (asynchrone) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).

@@ -8,6 +8,8 @@ Usage : make import FILE=<archive.zip | fichier | dossier>
 Fichiers reconnus (classification par nom) :
   - *node*.csv   : id;value;type;creation_date;rank        (';' + quotes)
   - *link*.csv   : id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date
+  - *propert*.csv : id_node;type;id_source;payload;version;detection_date
+                   (';' + quotes, guillemets internes échappés en \\")
   - *.json/.json.gz : {"cn":..., "dns":[...]|null, "ip":...|null}  (JSONEachRow)
 
 Pipeline (aucun parsing Python : streaming direct vers clickhouse-client,
@@ -21,6 +23,8 @@ tient le milliard de lignes) :
   5. distribution vers les tables optimisées :
      - node.csv → <type> selon le type (fqdn, ip, application,
        plugin, ... cf. NODE_TABLES), avec ses propres ids (distribute_nodes)
+     - properties.csv → property, id_node déjà numérique, sans résolution
+       (distribute_properties)
      - domains.json → valeurs (stg_value) et liens cn ↔ dns / cn ↔ ip
        (stg_link), sans id (sql/05_import_distribute.sql)
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
@@ -144,6 +148,51 @@ def distribute_nodes() -> None:
             mem=True)
         log(f"  {typ} : {int(cnt):,} lignes")
     query("DROP TABLE IF EXISTS stg_node")
+
+
+def distribute_properties() -> None:
+    """properties.csv (stg_property) → property.
+
+    id_node est déjà l'id du nœud dans la table de son type : aucune
+    résolution, pas de tranches (simple INSERT ... SELECT en streaming).
+    L'existence du nœud n'est pas vérifiée. Un type hors NODE_TABLES (absent
+    de l'Enum8) ou un id_node non numérique : ligne ignorée (et comptée).
+
+    version (date de mise à jour) → timestamp Unix, now() si illisible ;
+    detection_date illisible (dont la date zéro MySQL 0000-00-00) → date de
+    version."""
+    counts = query("SELECT lower(node_type), toInt64OrZero(id_node) != 0, count() "
+                   "FROM stg_property GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV")
+    if not counts:
+        query("DROP TABLE IF EXISTS stg_property")
+        return
+    log("Distribution des propriétés (properties.csv)...")
+    for line in counts.splitlines():
+        typ, valid, cnt = line.split("\t")
+        if typ not in NODE_TABLES:
+            log(f"  {typ or '(vide)'} : {int(cnt):,} lignes IGNORÉES (type inconnu)")
+        elif valid != "1":
+            log(f"  {typ} : {int(cnt):,} lignes IGNORÉES (id_node non numérique)")
+    # date zéro MySQL : parseDateTimeBestEffortOrNull('0000-00-00 00:00:00')
+    # ne renvoie PAS NULL (il renvoie le 1er janvier de l'année en cours)
+    def date(col: str) -> str:
+        return (f"if(startsWith({col}, '0000-00-00'), NULL, "
+                f"parseDateTimeBestEffortOrNull({col}))")
+    query(
+        "INSERT INTO property "
+        "(node_type, id_node, id_source, payload, detection_date, version) "
+        "SELECT lower(node_type), toInt64OrZero(id_node), toInt32OrZero(id_source), "
+        "payload, "
+        f"coalesce({date('detection_date')}, {date('version')}, now()), "
+        f"coalesce(toUnixTimestamp({date('version')}), toUnixTimestamp(now())) "
+        f"FROM stg_property WHERE lower(node_type) IN ({TYPES_SQL}) "
+        "AND toInt64OrZero(id_node) != 0",
+        mem=True)
+    for line in counts.splitlines():
+        typ, valid, cnt = line.split("\t")
+        if typ in NODE_TABLES and valid == "1":
+            log(f"  {typ} : {int(cnt):,} propriétés")
+    query("DROP TABLE IF EXISTS stg_property")
 
 
 def distribute_links(n: int = LINK_SLICES) -> None:
@@ -326,10 +375,21 @@ def iter_blocks(path: Path):
 
 
 def classify(path: Path):
-    """Retourne ('stg_node'|'stg_link'|'stg_domain', format, settings) ou None."""
+    """Retourne ('stg_node'|'stg_link'|'stg_property'|'stg_domain', format,
+    settings) ou None."""
     n = path.name.lower()
     csv_settings = ["--format_csv_delimiter=;",
                     "--input_format_csv_skip_first_lines=1"]
+    # properties.csv échappe les guillemets du payload par backslash (\"),
+    # que le format CSV de ClickHouse ne comprend pas (il attend "") : chaque
+    # champ est lu comme une chaîne JSON ("..." avec échappements \).
+    # En-tête sauté, colonnes prises dans l'ordre (pas par nom).
+    property_settings = ["--format_custom_escaping_rule=JSON",
+                         "--format_custom_field_delimiter=;",
+                         "--input_format_with_names_use_header=0"]
+    # testé avant node / link : "node_properties.csv" est un fichier de propriétés
+    if n.endswith(".csv") and "propert" in n:
+        return "stg_property", "CustomSeparatedWithNames", property_settings
     if n.endswith(".csv") and "node" in n:
         return "stg_node", "CSV", csv_settings
     if n.endswith(".csv") and ("link" in n or "edge" in n):
@@ -397,7 +457,8 @@ def main() -> None:
             jobs.append((f, *c))
         if not jobs:
             sys.exit("Aucun fichier importable trouvé "
-                     "(attendus : *node*.csv, *link*.csv, *.json[.gz]).")
+                     "(attendus : *node*.csv, *link*.csv, *propert*.csv, "
+                     "*.json[.gz]).")
 
         log("Création des tables de staging...")
         run_sql_file(SQL_STAGING)
@@ -414,9 +475,15 @@ def main() -> None:
             # fichier BRUT compressé, la décompression serait contournée.
             # On copie donc les blocs (décompressés) dans un vrai pipe.
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            # CustomSeparated attend exactement '\n' en fin de ligne (le CSV
+            # tolère '\r\n', pas lui) : on retire les '\r' des fichiers de
+            # propriétés. Sans risque : un '\r' dans une valeur y est échappé
+            # (texte \r), un '\r' brut ne peut être qu'une fin de ligne.
+            strip_cr = table == "stg_property"
             try:
                 for block in iter_blocks(f):
-                    proc.stdin.write(block)
+                    proc.stdin.write(block.replace(b"\r", b"") if strip_cr
+                                     else block)
                 proc.stdin.close()
             except BrokenPipeError:
                 pass  # le client a échoué, on récupère le code retour
@@ -435,6 +502,7 @@ def main() -> None:
             query("SYSTEM DROP MARK CACHE")
             query("SYSTEM DROP UNCOMPRESSED CACHE")
             distribute_nodes()  # node.csv → <type>
+            distribute_properties()  # properties.csv → property
             run_sql_file(SQL_DISTRIBUTE)  # domains.json → stg_value / stg_link
             distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
         finally:
@@ -447,6 +515,7 @@ def main() -> None:
             + " UNION ALL ".join(f"SELECT '{t}' AS tbl, count() AS n FROM {t}"
                                  for t in NODE_TABLES)
             + " UNION ALL SELECT 'link', count() FROM link"
+            " UNION ALL SELECT 'property', count() FROM property"
             ") ORDER BY tbl FORMAT PrettyCompactMonoBlock")
         log(counts)
         log(f"\nImport terminé en {time.monotonic() - t0:.0f} s "

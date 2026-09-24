@@ -8,6 +8,7 @@
 DROP TABLE IF EXISTS stg_node;
 DROP TABLE IF EXISTS stg_link;
 DROP TABLE IF EXISTS stg_domain;
+DROP TABLE IF EXISTS stg_value;
 
 -- node.csv : id;value;type;creation_date;rank  (séparateur ';', champs quotés)
 CREATE TABLE stg_node
@@ -44,6 +45,17 @@ CREATE TABLE stg_domain
     cn  Nullable(String),
     dns Array(Nullable(String)),
     ip  Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+-- valeurs fqdn/ip sans id (issues de domains.json) : alimentée par
+-- 05_import_distribute.sql, un id leur est attribué (auto-incrément à partir
+-- du max existant) par distribute_links() dans scripts/import_data.py
+CREATE TABLE stg_value
+(
+    node_type String,
+    value     String
 )
 ENGINE = MergeTree
 ORDER BY tuple();

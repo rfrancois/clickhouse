@@ -2,18 +2,16 @@
 -- DISTRIBUTION staging → tables optimisées — partie NODE / DOMAINS
 -- (fqdn_search / ip_search ; les tables naïves ne sont plus alimentées)
 -- ============================================================
--- La résolution des LIENS CSV (stg_link → link) n'est plus faite ici :
--- elle est pilotée en TRANCHES par scripts/import_data.py (distribute_links),
--- sinon les jointures sur les grosses tables font tuer le serveur par l'OOM
--- killer (exit 137) sur les VM Docker à faible RAM.
--- Les liens issus de domains.json (cn ↔ dns / cn ↔ ip) sont, eux, produits
--- ici (section 2b) : les deux ids sont de simples hash de la valeur, aucune
--- jointure n'est nécessaire.
---
--- Hypothèses (cf. README) :
---  * node.csv fournit id/rank/date ; domains.json n'a ni id ni rank
---    → id synthétique = cityHash64(valeur) tronqué à 31 bits, rank = 1000000,
---      version = now()
+-- Seul node.csv est inséré directement ici (il fournit ses propres ids).
+-- domains.json n'a pas d'id : ses valeurs (cn, dns, ip) sont versées dans
+-- stg_value et ses liens (cn ↔ dns, cn ↔ ip) dans stg_link, pour être traités
+-- comme les liens CSV par scripts/import_data.py (distribute_links) :
+--   * valeur déjà connue de fqdn_search / ip_search → on reprend son id ;
+--   * valeur inconnue → nouvel id auto-incrémenté à partir du max(id) du type,
+--     rank = 1000000, version = now().
+-- Cette résolution est faite en TRANCHES côté Python, sinon les jointures sur
+-- les grosses tables font tuer le serveur par l'OOM killer (exit 137) sur les
+-- VM Docker à faible RAM.
 
 -- ------------------------------------------------------------
 -- Garde-fous mémoire : chaque requête plafonne sa RAM et déborde sur disque
@@ -45,88 +43,48 @@ SELECT value,
 FROM stg_node
 WHERE lower(node_type) = 'ip' AND value != '';
 
--- ---------- 2) domains.json → fqdn (cn + chaque entrée dns) et ip ----------
+-- ---------- 2) domains.json → valeurs sans id (stg_value) ----------
+-- Pas d'insert direct dans fqdn_search / ip_search : l'id est attribué plus
+-- tard (auto-incrément), après résolution contre les valeurs existantes.
 
-INSERT INTO fqdn_search (value, id_fqdn, rank, version)
-SELECT cn,
-       toInt32(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       1000000,
-       toUnixTimestamp(now())
+INSERT INTO stg_value (node_type, value)
+SELECT 'fqdn', cn
 FROM stg_domain
 WHERE cn IS NOT NULL AND cn != '';
 
-INSERT INTO fqdn_search (value, id_fqdn, rank, version)
-SELECT value,
-       toInt32(bitAnd(cityHash64(value), 0x7FFFFFFF)),
-       1000000,
-       toUnixTimestamp(now())
+INSERT INTO stg_value (node_type, value)
+SELECT 'fqdn', value
 FROM (SELECT arrayJoin(dns) AS value FROM stg_domain)
 WHERE value IS NOT NULL AND value != '';
 
-INSERT INTO ip_search (value, id_ip, rank, version)
-SELECT ip,
-       toInt32(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
-       1000000,
-       toUnixTimestamp(now())
+INSERT INTO stg_value (node_type, value)
+SELECT 'ip', ip
 FROM stg_domain
 WHERE ip IS NOT NULL AND ip != '';
 
--- ---------- 2b) domains.json → liens cn ↔ dns et cn ↔ ip ----------
--- link ne stocke que (type, id) : on recalcule l'id synthétique de chaque
--- extrémité par le même hash qu'en section 2 (aucune jointure, insert direct).
--- Table link sans projection inverse (cf. 02_optimized.sql) : chaque lien est
--- inséré dans les DEUX sens (cn→d et d→cn). Auto-liens (dns == cn) filtrés.
+-- ---------- 2b) domains.json → liens cn ↔ dns et cn ↔ ip (stg_link) ----------
+-- Un seul sens ici : distribute_links() insère chaque lien résolu dans les
+-- DEUX sens dans link. Dates vides → now(), source 0. Auto-liens (dns == cn)
+-- filtrés.
 
 -- cn ─ dns  (fqdn ↔ fqdn)
-INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
-SELECT 'fqdn',
-       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       'fqdn',
-       toInt64(bitAnd(cityHash64(d), 0x7FFFFFFF)),
-       0,
-       toUnixTimestamp(now()),
-       toUnixTimestamp(now())
-FROM (SELECT cn, arrayJoin(dns) AS d FROM stg_domain
-      WHERE cn IS NOT NULL AND cn != '')
-WHERE d IS NOT NULL AND d != '' AND d != cn;
-
-INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
-SELECT 'fqdn',
-       toInt64(bitAnd(cityHash64(d), 0x7FFFFFFF)),
-       'fqdn',
-       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       0,
-       toUnixTimestamp(now()),
-       toUnixTimestamp(now())
+INSERT INTO stg_link (id_node_1, id_node_2, type_1, type_2, id_source,
+                      creation_date, update_date)
+SELECT cn, d, 'fqdn', 'fqdn', '0', '', ''
 FROM (SELECT cn, arrayJoin(dns) AS d FROM stg_domain
       WHERE cn IS NOT NULL AND cn != '')
 WHERE d IS NOT NULL AND d != '' AND d != cn;
 
 -- cn ─ ip  (fqdn ↔ ip)
-INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
-SELECT 'fqdn',
-       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       'ip',
-       toInt64(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
-       0,
-       toUnixTimestamp(now()),
-       toUnixTimestamp(now())
-FROM stg_domain
-WHERE cn IS NOT NULL AND cn != '' AND ip IS NOT NULL AND ip != '';
-
-INSERT INTO link (type_1, id_1, type_2, id_2, source_id, detection_date, version)
-SELECT 'ip',
-       toInt64(bitAnd(cityHash64(ip), 0x7FFFFFFF)),
-       'fqdn',
-       toInt64(bitAnd(cityHash64(cn), 0x7FFFFFFF)),
-       0,
-       toUnixTimestamp(now()),
-       toUnixTimestamp(now())
+INSERT INTO stg_link (id_node_1, id_node_2, type_1, type_2, id_source,
+                      creation_date, update_date)
+SELECT cn, ip, 'fqdn', 'ip', '0', '', ''
 FROM stg_domain
 WHERE cn IS NOT NULL AND cn != '' AND ip IS NOT NULL AND ip != '';
 
 -- ---------- 3) staging node / domains nettoyé ----------
--- stg_link est conservé : consommé ensuite par distribute_links() côté Python.
+-- stg_link et stg_value sont conservés : consommés ensuite par
+-- distribute_links() côté Python.
 
 DROP TABLE stg_node;
 DROP TABLE stg_domain;

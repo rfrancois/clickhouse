@@ -50,16 +50,20 @@ streaming `clickhouse-client`, pas de parsing Python) → distribution
 automatiquement avant le chargement.
 
 Choix d'import :
-- `domains.json` n'a ni id ni rank → id synthétique `cityHash64(valeur)`
-  tronqué, `rank = 1000000`, `version = now()` ;
+- aucun id n'est calculé à partir d'une valeur : `node.csv` garde ses
+  propres ids ; toute autre valeur fqdn/ip (`domains.json`, extrémités de
+  liens) est d'abord cherchée dans `fqdn_search` / `ip_search` et reprend
+  l'id existant ; si elle est absente, elle reçoit un **nouvel id
+  auto-incrémenté** à partir du `max(id)` du type déjà en base
+  (`max + 1`, `max + 2`, ...), avec `rank = 1000000`, `version = now()`.
+  Un seul import à la fois (deux imports concurrents liraient le même max) ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
   chaque extrémité (`type_1` / `type_2` = `fqdn` | `ip`) : résolution
-  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`. Une
-  extrémité fqdn/ip inconnue de ces tables est **créée** (même id synthétique
-  `cityHash64` tronqué et `rank = 1000000` que pour `domains.json`) avant la
-  jointure, plutôt que d'être ignorée. Seuls les autres types (`application`,
-  `plugin`, ...), qui n'ont pas de table de valeurs, restent ignorés et
-  comptés dans `liens_ignores_noeud_inconnu` pendant l'import.
+  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`, après
+  création des extrémités fqdn/ip inconnues (règle ci-dessus). Les liens
+  `cn ↔ dns` et `cn ↔ ip` de `domains.json` suivent le même chemin. Seuls
+  les autres types (`application`, `plugin`, ...), qui n'ont pas de table de
+  valeurs, restent ignorés et comptés pendant l'import.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
   chaque lien résolu est inséré dans `link` **dans les deux sens** (voir la

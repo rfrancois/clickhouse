@@ -18,15 +18,15 @@ tient le milliard de lignes) :
   4. chargement brut de chaque fichier (FORMAT CSV / JSONEachRow, gunzip
      à la volée si nécessaire)
   5. distribution vers les tables optimisées :
-     - node.csv / domains.json → fqdn_search / ip_search
+     - node.csv → fqdn_search / ip_search avec ses propres ids
        (sql/05_import_distribute.sql)
-     - domains.json → link (typée) : liens cn ↔ dns et cn ↔ ip, ids = hash de la
-       valeur, insert direct sans jointure, DANS LES DEUX SENS
-       (sql/05_import_distribute.sql)
-     - liens CSV : résolution valeur → id puis stg_link → link, en N
-       tranches (distribute_links, pour tenir en RAM sur une VM Docker modeste),
-       DANS LES DEUX SENS ; les fqdn/ip référencés mais absents sont créés
-       (id synthétique, rank 1000000) plutôt que d'ignorer le lien
+     - domains.json → valeurs (stg_value) et liens cn ↔ dns / cn ↔ ip
+       (stg_link), sans id (sql/05_import_distribute.sql)
+     - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
+       Docker modeste) : résolution valeur → id ; toute valeur fqdn/ip absente
+       des tables reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id)
+       existant (rank 1000000) ; chaque lien est inséré dans link DANS LES
+       DEUX SENS
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 (A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
@@ -96,27 +96,39 @@ def run_sql_file(path: Path) -> None:
 
 
 def distribute_links(n: int = LINK_SLICES) -> None:
-    """Résout stg_link → link en N tranches (empreinte mémoire bornée).
+    """Attribue les ids manquants puis résout stg_link → link, en N tranches
+    (empreinte mémoire bornée).
 
     Tranche par cityHash64 : pour la tranche k on ne traite que les valeurs de
     nœuds (resp. les liens) dont le hash % n == k. Aucune requête ne voit donc
-    plus de 1/n des données à la fois.
+    plus de 1/n des données à la fois. Le hash ne sert qu'au découpage, jamais
+    d'id.
 
-    Les extrémités fqdn/ip absentes de fqdn_search/ip_search sont créées
-    (même formule d'id synthétique que pour domains.json : cityHash64 tronqué
-    à 31 bits, rank = 1000000) plutôt que d'être ignorées. Les autres types
-    (application, plugin, ...) n'ont pas de table de valeurs et restent
-    ignorés si inconnus.
+    Valeurs traitées : les extrémités de stg_link (links.csv + liens de
+    domains.json) et les valeurs de domains.json (stg_value). Une valeur fqdn/ip
+    déjà présente dans fqdn_search / ip_search garde son id ; une valeur absente
+    reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) existant du type
+    (max + 1, max + 2, ...), rank = 1000000. Les autres types (application,
+    plugin, ...) n'ont pas de table de valeurs et restent ignorés si inconnus.
+
+    Suppose un seul import à la fois : deux imports concurrents liraient le
+    même max(id) et attribueraient les mêmes ids.
 
     Chaque lien résolu est inséré dans les deux sens (pas de projection
     inverse sur link, cf. 02_optimized.sql).
     """
-    log(f"Résolution des liens → link en {n} tranches...")
-    for t in ("fqdn_search", "ip_search", "stg_link"):
+    if query("SELECT (SELECT count() FROM stg_link) + "
+             "(SELECT count() FROM stg_value)") == "0":
+        for tbl in ("stg_link", "stg_value"):
+            query(f"DROP TABLE IF EXISTS {tbl}")
+        return
+
+    log(f"Résolution des nœuds et des liens → link en {n} tranches...")
+    for t in ("fqdn_search", "ip_search", "stg_link", "stg_value"):
         log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
 
     # 3a — table de correspondance (type, valeur) → id, restreinte aux valeurs
-    # citées par les liens, construite tranche par tranche.
+    # citées par les liens ou par domains.json, construite tranche par tranche.
     query("DROP TABLE IF EXISTS tmp_link_values")
     query("CREATE TABLE tmp_link_values (node_type String, value String) "
           "ENGINE = MergeTree ORDER BY (node_type, value)")
@@ -133,6 +145,9 @@ def distribute_links(n: int = LINK_SLICES) -> None:
             " UNION ALL"
             " SELECT lower(type_2), id_node_2 FROM stg_link"
             f"  WHERE cityHash64(id_node_2) % {n} = {k}"
+            " UNION ALL"
+            " SELECT node_type, value FROM stg_value"
+            f"  WHERE cityHash64(value) % {n} = {k}"
             ") WHERE value != '' GROUP BY node_type, value", mem=True)
     for k in range(n):
         for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
@@ -145,31 +160,38 @@ def distribute_links(n: int = LINK_SLICES) -> None:
                 "GROUP BY value", mem=True)
     log(f"  correspondance valeur → id construite en {time.monotonic() - t:.0f} s")
 
-    # 3a bis — crée les fqdn/ip cités par les liens mais absents des tables
-    # optimisées (même formule d'id que domains.json), puis les ajoute à
-    # tmp_node_map pour qu'ils soient résolus comme les nœuds existants.
-    avant = int(query("SELECT count() FROM tmp_node_map"))
+    # 3a bis — nouveaux ids pour les fqdn/ip absents de fqdn_search/ip_search :
+    # auto-incrément à partir du max(id) existant. Chaque tranche numérote ses
+    # valeurs inconnues à la suite de la précédente (row_number() + dernier id
+    # attribué), puis les nœuds créés (id > max initial) sont insérés dans
+    # fqdn_search / ip_search.
     t = time.monotonic()
-    for k in range(n):
-        for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
-                                ("ip", "ip_search", "id_ip")):
-            query(
-                f"INSERT INTO {tbl} (value, {idcol}, rank, version) "
-                "SELECT value, toInt32(bitAnd(cityHash64(value), 0x7FFFFFFF)), "
-                "1000000, toUnixTimestamp(now()) FROM tmp_link_values "
-                f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k} "
-                "AND value NOT IN (SELECT value FROM tmp_node_map "
-                f"WHERE node_type = '{typ}')", mem=True)
+    for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
+                            ("ip", "ip_search", "id_ip")):
+        base = start = int(query(f"SELECT max({idcol}) FROM {tbl}"))
+        for k in range(n):
             query(
                 f"INSERT INTO tmp_node_map SELECT '{typ}', value, "
-                "toInt64(bitAnd(cityHash64(value), 0x7FFFFFFF)) "
+                f"toInt64({base} + row_number() OVER ()) "
                 "FROM tmp_link_values "
                 f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k} "
                 "AND value NOT IN (SELECT value FROM tmp_node_map "
-                f"WHERE node_type = '{typ}')", mem=True)
-    crees = int(query("SELECT count() FROM tmp_node_map")) - avant
-    log(f"  {crees:,} nœuds fqdn/ip créés (absents de fqdn_search/ip_search) "
-        f"en {time.monotonic() - t:.0f} s")
+                f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k})",
+                mem=True)
+            base = max(base, int(query(
+                f"SELECT max(id) FROM tmp_node_map WHERE node_type = '{typ}'")))
+        if base > 2**31 - 1:
+            sys.exit(f"Dépassement de {tbl}.{idcol} (Int32) : "
+                     f"le prochain id serait {base:,}.")
+        query(
+            f"INSERT INTO {tbl} (value, {idcol}, rank, version) "
+            "SELECT value, toInt32(id), 1000000, toUnixTimestamp(now()) "
+            f"FROM tmp_node_map WHERE node_type = '{typ}' AND id > {start}",
+            mem=True)
+        log(f"  {base - start:,} nœuds {typ} créés "
+            f"(ids {start + 1:,} → {base:,})" if base > start
+            else f"  aucun nœud {typ} créé")
+    log(f"  nouveaux ids attribués en {time.monotonic() - t:.0f} s")
 
     # 3b — réécriture des liens avec les ids, tranche par tranche. Table link
     # sans projection inverse (cf. 02_optimized.sql) : chaque lien résolu est
@@ -208,7 +230,7 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     log(f"  liens résolus : {resolus:,} / {staged:,} "
         f"(ignorés, nœud inconnu : {staged - resolus:,})")
 
-    for tbl in ("tmp_node_map", "tmp_link_values", "stg_link"):
+    for tbl in ("tmp_node_map", "tmp_link_values", "stg_link", "stg_value"):
         query(f"DROP TABLE IF EXISTS {tbl}")
 
 
@@ -359,11 +381,8 @@ def main() -> None:
         try:
             query("SYSTEM DROP MARK CACHE")
             query("SYSTEM DROP UNCOMPRESSED CACHE")
-            run_sql_file(SQL_DISTRIBUTE)  # node.csv / domains.json → fqdn / ip
-            if any(table == "stg_link" for _, table, _, _ in jobs):
-                distribute_links()
-            else:
-                query("DROP TABLE IF EXISTS stg_link")
+            run_sql_file(SQL_DISTRIBUTE)  # node.csv → fqdn / ip ; domains.json → staging
+            distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
         finally:
             query("SYSTEM START MERGES")
         log(f"  fait en {time.monotonic() - t:.0f} s")

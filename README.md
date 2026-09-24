@@ -150,7 +150,7 @@ type de chaque extrémité :
   `organization_id`, `phone`, `social_id`) ; un nouveau type s'ajoute à la
   fin des deux `Enum8` (métadonnées seules) ;
 - une seule table pour tous les couples de types, triée
-  `(type_1, id_1, type_2, id_2, source_id)`, `PARTITION BY type_1` : une
+  `(type_1, id_1, type_2, id_2, id_source)`, `PARTITION BY type_1` : une
   ligne par lien orienté **et par source** (un lien vu par deux sources
   garde ses deux lignes ; une nouvelle détection d'une même source remplace
   l'ancienne). Pour des voisins distincts, `DISTINCT` / `GROUP BY` à la

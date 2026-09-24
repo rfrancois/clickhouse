@@ -12,7 +12,7 @@ CREATE TABLE test_text_index
 (
     value    String,
     id_fqdn  Int64,
-    rank     UInt32,
+    rank     Int32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
     INDEX idx_text  value TYPE text(tokenizer = ngrams(3))

@@ -20,7 +20,7 @@ CREATE TABLE fqdn
 (
     value    String,
     id_fqdn  Int64,
-    rank     UInt32,
+    rank     Int32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
     -- index texte EXACT pour LIKE '%…%' : lit ~5x moins de blocs que le ngram
@@ -43,7 +43,7 @@ CREATE TABLE ip
 (
     value    String,
     id_ip    Int64,
-    rank     UInt32,
+    rank     Int32,
     version  UInt64,
     -- pas d'index ngram/texte : une IP n'a que des chiffres et des points, les
     -- trigrammes sont partout, l'index ne filtre rien (testé, plus lent avec)
@@ -164,7 +164,7 @@ CREATE TABLE link
                          'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
                          'phone' = 8, 'social_id' = 9),
     id_2           Int64,
-    source_id      Int32,
+    id_source      Int32,
     detection_date UInt64,
     version        UInt64
 )
@@ -178,7 +178,7 @@ PARTITION BY type_1
 -- aussi). Une nouvelle détection d'une même source remplace l'ancienne,
 -- comme dans property. Voisins distincts : DISTINCT / GROUP BY à la lecture.
 PRIMARY KEY (type_1, id_1)
-ORDER BY (type_1, id_1, type_2, id_2, source_id);
+ORDER BY (type_1, id_1, type_2, id_2, id_source);
 
 -- 3) property : les informations (payload) de chaque nœud, par source.
 --    (node_type, id_node) identifie le nœud, comme dans link.
@@ -190,7 +190,7 @@ CREATE TABLE property
                          'phone' = 8, 'social_id' = 9),
     -- même id que fqdn.id_fqdn / ip.id_ip / link.id_1|id_2
     id_node        Int64,
-    id_source      Int64,
+    id_source      Int32,
     -- renvoyé tel quel, jamais filtré : String compressé plutôt que JSON typé
     payload        String CODEC(ZSTD(3)),
     detection_date DateTime,

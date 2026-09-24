@@ -136,7 +136,7 @@ def distribute_nodes() -> None:
         query(
             f"INSERT INTO {typ} (value, {idcol}, {'rank, ' if ranked else ''}version) "
             "SELECT value, toInt64OrZero(id), "
-            + (f"if(toUInt32OrZero(rank) = 0, {NEW_RANK}, toUInt32OrZero(rank)), "
+            + (f"if(toInt32OrZero(rank) = 0, {NEW_RANK}, toInt32OrZero(rank)), "
                if ranked else "")
             + "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)), "
             "toUnixTimestamp(now())) "
@@ -260,14 +260,14 @@ def distribute_links(n: int = LINK_SLICES) -> None:
         )
         query(
             "INSERT INTO link "
-            "(type_1, id_1, type_2, id_2, source_id, detection_date, version) "
+            "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
             "SELECT l.t1, n1.id, l.t2, n2.id, toInt32OrZero(l.id_source), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
             + base, mem=True)
         query(
             "INSERT INTO link "
-            "(type_1, id_1, type_2, id_2, source_id, detection_date, version) "
+            "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
             "SELECT l.t2, n2.id, l.t1, n1.id, toInt32OrZero(l.id_source), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "

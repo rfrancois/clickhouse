@@ -88,19 +88,19 @@ def main() -> None:
     for i in range(N_LINKS):
         id_fqdn = rng.randint(1, N_FQDN)
         id_ip = rng.randint(1, N_IP)
-        source_id = rng.randint(1, 100)
+        id_source = rng.randint(1, 100)
         detection_date = now - rng.randint(0, 31_536_000)
-        rows.append(("fqdn", id_fqdn, "ip", id_ip, source_id, detection_date, 1))
-        rows.append(("ip", id_ip, "fqdn", id_fqdn, source_id, detection_date, 1))
+        rows.append(("fqdn", id_fqdn, "ip", id_ip, id_source, detection_date, 1))
+        rows.append(("ip", id_ip, "fqdn", id_fqdn, id_source, detection_date, 1))
         if len(rows) >= BATCH:
             client.insert("link", rows,
                           column_names=["type_1", "id_1", "type_2", "id_2",
-                                        "source_id", "detection_date", "version"])
+                                        "id_source", "detection_date", "version"])
             rows.clear()
     if rows:
         client.insert("link", rows,
                       column_names=["type_1", "id_1", "type_2", "id_2",
-                                    "source_id", "detection_date", "version"])
+                                    "id_source", "detection_date", "version"])
 
     for t in ("fqdn", "ip", "link"):
         n = client.command(f"SELECT count() FROM {t}")

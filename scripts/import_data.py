@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Import de fichiers réels vers les tables optimisées
-(fqdn_search / ip_search / link — les tables naïves ne sont plus alimentées).
+(<type> pour chaque type de nœud, link — les tables naïves ne sont
+plus alimentées).
 
 Usage : make import FILE=<archive.zip | fichier | dossier>
 
@@ -18,15 +19,15 @@ tient le milliard de lignes) :
   4. chargement brut de chaque fichier (FORMAT CSV / JSONEachRow, gunzip
      à la volée si nécessaire)
   5. distribution vers les tables optimisées :
-     - node.csv → fqdn_search / ip_search avec ses propres ids
-       (sql/05_import_distribute.sql)
+     - node.csv → <type> selon le type (fqdn, ip, application,
+       plugin, ... cf. NODE_TABLES), avec ses propres ids (distribute_nodes)
      - domains.json → valeurs (stg_value) et liens cn ↔ dns / cn ↔ ip
        (stg_link), sans id (sql/05_import_distribute.sql)
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
-       Docker modeste) : résolution valeur → id ; toute valeur fqdn/ip absente
-       des tables reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id)
-       existant (rank 1000000) ; chaque lien est inséré dans link DANS LES
-       DEUX SENS
+       Docker modeste) : résolution valeur → id ; toute valeur absente de
+       sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
+       type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
+       DANS LES DEUX SENS
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 (A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
@@ -47,6 +48,25 @@ ROOT = Path(__file__).resolve().parent.parent
 SQL_STAGING = ROOT / "sql" / "04_import_staging.sql"
 SQL_DISTRIBUTE = ROOT / "sql" / "05_import_distribute.sql"
 
+# Types de nœuds (ceux de l'Enum8 de link / property) → colonne id de leur
+# table de valeurs (la table porte le nom du type). Seuls fqdn et ip ont un
+# rank. Nouveau type : l'ajouter ici, à la fin de l'Enum8, et créer sa table
+# dans sql/02_optimized.sql.
+NODE_TABLES = {
+    "application":       "id_application",
+    "capture":           "id_capture",
+    "fqdn":              "id_fqdn",
+    "ip":                "id_ip",
+    "plugin":            "id_plugin",
+    "organization_name": "id_organization_name",
+    "organization_id":   "id_organization_id",
+    "phone":             "id_phone",
+    "social_id":         "id_social_id",
+}
+RANKED = {"fqdn", "ip"}
+NEW_RANK = 1000000  # rank des nœuds sans rank connu (fin de ORDER BY rank)
+TYPES_SQL = ", ".join(f"'{t}'" for t in NODE_TABLES)
+
 CLIENT = ["docker", "exec", "-i", "bench_clickhouse", "clickhouse-client",
           "--user", "bench", "--password", "bench"]
 
@@ -62,7 +82,7 @@ DROP_OK = ["--max_table_size_to_drop=0", "--max_partition_size_to_drop=0"]
 # Garde-fous mémoire pour la résolution des liens en tranches (cf.
 # distribute_links). Passés en ligne de commande car ces requêtes sont
 # lancées une par une, hors du fichier SQL.
-#   use_skip_indexes=0 : fqdn_search est triée sur (id_fqdn, value), donc
+#   use_skip_indexes=0 : fqdn est triée sur (id_fqdn, value), donc
 #   l'index ngram sur `value` n'élague rien pour une égalité — inutile de
 #   charger ~2 Gio de filtres de Bloom pour un scan qui sera complet.
 MEM = ["--max_threads=1",
@@ -95,6 +115,37 @@ def run_sql_file(path: Path) -> None:
         subprocess.run(CLIENT + DROP_OK + ["--multiquery"], stdin=f, check=True)
 
 
+def distribute_nodes() -> None:
+    """node.csv (stg_node) → <type>, avec les ids fournis par le fichier.
+
+    Un type absent de NODE_TABLES n'a pas de table : ses lignes sont ignorées
+    (et comptées)."""
+    counts = query("SELECT lower(node_type), count() FROM stg_node "
+                   "WHERE value != '' GROUP BY 1 ORDER BY 1 FORMAT TSV")
+    if not counts:
+        query("DROP TABLE IF EXISTS stg_node")
+        return
+    log("Distribution des nœuds (node.csv)...")
+    for line in counts.splitlines():
+        typ, cnt = line.split("\t")
+        if typ not in NODE_TABLES:
+            log(f"  {typ or '(vide)'} : {int(cnt):,} lignes IGNORÉES (type inconnu)")
+            continue
+        idcol = NODE_TABLES[typ]
+        ranked = typ in RANKED
+        query(
+            f"INSERT INTO {typ} (value, {idcol}, {'rank, ' if ranked else ''}version) "
+            "SELECT value, toInt64OrZero(id), "
+            + (f"if(toUInt32OrZero(rank) = 0, {NEW_RANK}, toUInt32OrZero(rank)), "
+               if ranked else "")
+            + "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)), "
+            "toUnixTimestamp(now())) "
+            f"FROM stg_node WHERE lower(node_type) = '{typ}' AND value != ''",
+            mem=True)
+        log(f"  {typ} : {int(cnt):,} lignes")
+    query("DROP TABLE IF EXISTS stg_node")
+
+
 def distribute_links(n: int = LINK_SLICES) -> None:
     """Attribue les ids manquants puis résout stg_link → link, en N tranches
     (empreinte mémoire bornée).
@@ -105,11 +156,12 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     d'id.
 
     Valeurs traitées : les extrémités de stg_link (links.csv + liens de
-    domains.json) et les valeurs de domains.json (stg_value). Une valeur fqdn/ip
-    déjà présente dans fqdn_search / ip_search garde son id ; une valeur absente
-    reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) existant du type
-    (max + 1, max + 2, ...), rank = 1000000. Les autres types (application,
-    plugin, ...) n'ont pas de table de valeurs et restent ignorés si inconnus.
+    domains.json) et les valeurs de domains.json (stg_value), pour tous les
+    types de NODE_TABLES. Une valeur déjà présente dans la table <type>
+    garde son id ; une valeur absente est créée avec un nouvel id
+    AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
+    ...), rank = 1000000 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
+    table : ses liens sont ignorés (et comptés).
 
     Suppose un seul import à la fois : deux imports concurrents liraient le
     même max(id) et attribueraient les mêmes ids.
@@ -124,7 +176,7 @@ def distribute_links(n: int = LINK_SLICES) -> None:
         return
 
     log(f"Résolution des nœuds et des liens → link en {n} tranches...")
-    for t in ("fqdn_search", "ip_search", "stg_link", "stg_value"):
+    for t in ("stg_link", "stg_value"):
         log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
 
     # 3a — table de correspondance (type, valeur) → id, restreinte aux valeurs
@@ -148,27 +200,29 @@ def distribute_links(n: int = LINK_SLICES) -> None:
             " UNION ALL"
             " SELECT node_type, value FROM stg_value"
             f"  WHERE cityHash64(value) % {n} = {k}"
-            ") WHERE value != '' GROUP BY node_type, value", mem=True)
+            f") WHERE value != '' AND node_type IN ({TYPES_SQL}) "
+            "GROUP BY node_type, value", mem=True)
+    # types réellement cités : inutile de parcourir les tables des autres
+    present = set(query("SELECT DISTINCT node_type FROM tmp_link_values").split())
+    types = [(typ, idcol) for typ, idcol in NODE_TABLES.items() if typ in present]
     for k in range(n):
-        for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
-                                ("ip", "ip_search", "id_ip")):
+        for typ, idcol in types:
             query(
                 f"INSERT INTO tmp_node_map SELECT '{typ}', value, "
-                f"argMax(toInt64({idcol}), version) FROM {tbl} "
+                f"argMax({idcol}, version) FROM {typ} "
                 "WHERE value IN (SELECT value FROM tmp_link_values "
                 f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k}) "
                 "GROUP BY value", mem=True)
     log(f"  correspondance valeur → id construite en {time.monotonic() - t:.0f} s")
 
-    # 3a bis — nouveaux ids pour les fqdn/ip absents de fqdn_search/ip_search :
-    # auto-incrément à partir du max(id) existant. Chaque tranche numérote ses
-    # valeurs inconnues à la suite de la précédente (row_number() + dernier id
-    # attribué), puis les nœuds créés (id > max initial) sont insérés dans
-    # fqdn_search / ip_search.
+    # 3a bis — nouveaux ids pour les valeurs absentes de leur table <type> :
+    # auto-incrément à partir du max(id) existant du type. Chaque tranche
+    # numérote ses valeurs inconnues à la suite de la précédente (row_number()
+    # + dernier id attribué), puis les nœuds créés (id > max initial) sont
+    # insérés dans la table du type.
     t = time.monotonic()
-    for typ, tbl, idcol in (("fqdn", "fqdn_search", "id_fqdn"),
-                            ("ip", "ip_search", "id_ip")):
-        base = start = int(query(f"SELECT max({idcol}) FROM {tbl}"))
+    for typ, idcol in types:
+        base = start = int(query(f"SELECT max({idcol}) FROM {typ}"))
         for k in range(n):
             query(
                 f"INSERT INTO tmp_node_map SELECT '{typ}', value, "
@@ -180,12 +234,11 @@ def distribute_links(n: int = LINK_SLICES) -> None:
                 mem=True)
             base = max(base, int(query(
                 f"SELECT max(id) FROM tmp_node_map WHERE node_type = '{typ}'")))
-        if base > 2**31 - 1:
-            sys.exit(f"Dépassement de {tbl}.{idcol} (Int32) : "
-                     f"le prochain id serait {base:,}.")
+        ranked = typ in RANKED
         query(
-            f"INSERT INTO {tbl} (value, {idcol}, rank, version) "
-            "SELECT value, toInt32(id), 1000000, toUnixTimestamp(now()) "
+            f"INSERT INTO {typ} (value, {idcol}, {'rank, ' if ranked else ''}version) "
+            f"SELECT value, id, {f'{NEW_RANK}, ' if ranked else ''}"
+            "toUnixTimestamp(now()) "
             f"FROM tmp_node_map WHERE node_type = '{typ}' AND id > {start}",
             mem=True)
         log(f"  {base - start:,} nœuds {typ} créés "
@@ -328,7 +381,7 @@ def main() -> None:
     # Schéma optimisé requis : créé ici si `make init` n'a jamais été lancé.
     # (02_optimized.sql DROP + CREATE : on ne l'exécute que si la table est
     # absente, jamais sur un schéma existant — l'import reste idempotent.)
-    if query("EXISTS TABLE fqdn_search") != "1":
+    if query("EXISTS TABLE fqdn") != "1":
         log("Tables optimisées absentes → création du schéma "
             "(sql/02_optimized.sql)...")
         run_sql_file(ROOT / "sql" / "02_optimized.sql")
@@ -381,7 +434,8 @@ def main() -> None:
         try:
             query("SYSTEM DROP MARK CACHE")
             query("SYSTEM DROP UNCOMPRESSED CACHE")
-            run_sql_file(SQL_DISTRIBUTE)  # node.csv → fqdn / ip ; domains.json → staging
+            distribute_nodes()  # node.csv → <type>
+            run_sql_file(SQL_DISTRIBUTE)  # domains.json → stg_value / stg_link
             distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
         finally:
             query("SYSTEM START MERGES")
@@ -390,9 +444,9 @@ def main() -> None:
         log("\nCompteurs après import :")
         counts = query(
             "SELECT * FROM ("
-            "SELECT 'fqdn_search' AS tbl, count() AS n FROM fqdn_search UNION ALL "
-            "SELECT 'ip_search', count() FROM ip_search UNION ALL "
-            "SELECT 'link', count() FROM link"
+            + " UNION ALL ".join(f"SELECT '{t}' AS tbl, count() AS n FROM {t}"
+                                 for t in NODE_TABLES)
+            + " UNION ALL SELECT 'link', count() FROM link"
             ") ORDER BY tbl FORMAT PrettyCompactMonoBlock")
         log(counts)
         log(f"\nImport terminé en {time.monotonic() - t0:.0f} s "

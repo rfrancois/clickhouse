@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init migrate migrate-swap migrate-ip migrate-ip-swap migrate-link migrate-link-swap migrate-link-bidir migrate-link-source migrate-link-source-swap property text-index upgrade generate test import pdf down clean
+.PHONY: all up wait init upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -23,51 +23,6 @@ upgrade:
 	docker compose up -d
 	@$(MAKE) --no-print-directory wait
 	@docker exec bench_clickhouse clickhouse-client --user bench --password bench -q "SELECT 'ClickHouse ' || version()"
-
-# Base existante : copie de fqdn_search triée par nom inversé (table actuelle intacte)
-migrate:
-	$(CLIENT) < sql/07_migrate_copy.sql
-
-# Bascule vers la nouvelle table (ancienne gardée sous fqdn_search_old)
-migrate-swap:
-	$(CLIENT) < sql/08_migrate_swap.sql
-
-# Même migration pour ip_search (tri par valeur, sans index ngram)
-migrate-ip:
-	$(CLIENT) < sql/10_migrate_ip_copy.sql
-
-migrate-ip-swap:
-	$(CLIENT) < sql/11_migrate_ip_swap.sql
-
-# link_opt (non typée) → link (type de chaque extrémité), link_opt intacte
-migrate-link:
-	$(CLIENT) < sql/12_migrate_link_copy.sql
-
-# Mise de côté de link_opt (renommée link_opt_old)
-migrate-link-swap:
-	$(CLIENT) < sql/13_migrate_link_swap.sql
-
-# Base link déjà typée mais à sens unique (+ projection p_reverse) → liens
-# dupliqués dans les deux sens, projection supprimée. À lancer une seule fois.
-migrate-link-bidir:
-	$(CLIENT) < sql/15_migrate_link_bidirectional.sql
-
-# source_id ajouté à la clé de tri de link (une ligne par lien et par source) :
-# copie dans link_new, puis bascule (ancienne gardée sous link_old)
-migrate-link-source:
-	$(CLIENT) < sql/16_migrate_link_source_copy.sql
-
-migrate-link-source-swap:
-	$(CLIENT) < sql/17_migrate_link_source_swap.sql
-
-# Création de la table property (payload par nœud et par source), vide
-property:
-	$(CLIENT) < sql/14_create_property.sql
-
-# Ajout de l'index texte exact sur fqdn_search (sans copie, en arrière-plan)
-text-index:
-	$(CLIENT) < sql/09_add_text_index.sql
-	@echo "Index texte en construction — suivi : system.mutations (voir sql/09_add_text_index.sql)."
 
 generate: .venv
 	$(PYTHON) scripts/generate_data.py

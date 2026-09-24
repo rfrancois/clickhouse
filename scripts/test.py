@@ -19,7 +19,7 @@ LIMIT = 100
 
 SIMPLE_QUERY = f"""
 SELECT id_fqdn, value
-FROM fqdn_search
+FROM fqdn
 WHERE value LIKE '%{TERM}%'
 ORDER BY id_fqdn
 LIMIT {LIMIT}
@@ -27,14 +27,14 @@ LIMIT {LIMIT}
 
 JOIN_QUERY = f"""
 SELECT DISTINCT ip.id_ip, ip.value
-FROM ip_search AS ip
+FROM ip
 WHERE ip.id_ip IN (
     SELECT l.id_2
     FROM link AS l
     WHERE l.type_1 = 'fqdn' AND l.type_2 = 'ip'
       AND l.id_1 IN (
         SELECT DISTINCT f.id_fqdn
-        FROM fqdn_search AS f
+        FROM fqdn AS f
         WHERE f.value LIKE '%{TERM}%'
     )
 )
@@ -90,7 +90,7 @@ def main():
     # --- Requêtes chronométrées -------------------------------------------
     print()
     for label, query in [
-        ("Requête simple   (fqdn_search LIKE)", SIMPLE_QUERY),
+        ("Requête simple   (fqdn LIKE)", SIMPLE_QUERY),
         ("Requête jointure (FQDN -> link -> IP)", JOIN_QUERY),
     ]:
         t0 = time.perf_counter()

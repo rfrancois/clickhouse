@@ -2,23 +2,30 @@
 -- SCHÉMA OPTIMISÉ — la "solution" (cf. SOLUTION.md)
 -- ============================================================
 
-DROP TABLE IF EXISTS fqdn_search;
-DROP TABLE IF EXISTS ip_search;
+DROP TABLE IF EXISTS fqdn;
+DROP TABLE IF EXISTS ip;
+DROP TABLE IF EXISTS application;
+DROP TABLE IF EXISTS capture;
+DROP TABLE IF EXISTS plugin;
+DROP TABLE IF EXISTS organization_name;
+DROP TABLE IF EXISTS organization_id;
+DROP TABLE IF EXISTS phone;
+DROP TABLE IF EXISTS social_id;
 DROP TABLE IF EXISTS link;
 DROP TABLE IF EXISTS property;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :
 --    c'est l'index qui fait toute la différence, pas un changement de format
-CREATE TABLE fqdn_search
+CREATE TABLE fqdn
 (
     value    String,
-    id_fqdn  Int32,
+    id_fqdn  Int64,
     rank     UInt32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
     -- index texte EXACT pour LIKE '%…%' : lit ~5x moins de blocs que le ngram
     -- (probabiliste). Le ngram est gardé tant que les imports avec l'index
-    -- texte ne sont pas validés (cf. sql/09_add_text_index.sql)
+    -- texte ne sont pas validés
     INDEX idx_text value TYPE text(tokenizer = ngrams(3)),
     -- recherche par id (jointure FQDN → liens → IP) : projection légère
     -- (positions des lignes seulement), triée par id_fqdn
@@ -32,10 +39,10 @@ ENGINE = ReplacingMergeTree(version)
 ORDER BY (reverse(value), id_fqdn)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
-CREATE TABLE ip_search
+CREATE TABLE ip
 (
     value    String,
-    id_ip    Int32,
+    id_ip    Int64,
     rank     UInt32,
     version  UInt64,
     -- pas d'index ngram/texte : une IP n'a que des chiffres et des points, les
@@ -47,6 +54,91 @@ ENGINE = ReplacingMergeTree(version)
 -- tri par valeur (ordre normal) : un sous-réseau est contigu, donc
 -- LIKE '192.168.%' passe par la clé primaire
 ORDER BY (value, id_ip)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+-- 1 bis) une table de valeurs par autre type de nœud (application, capture,
+--    plugin, organization_name, organization_id, phone, social_id).
+--    Même modèle que la table ip (value, id, version), SANS rank : ces types
+--    ne sont pas classés. Tri par valeur (résolution valeur → id à l'import),
+--    projection légère par id (jointure liens → valeur). Nouveau type de
+--    nœud → nouvelle table <type> ici + NODE_TABLES dans
+--    scripts/import_data.py.
+
+CREATE TABLE application
+(
+    value                String,
+    id_application       Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_application)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_application)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE capture
+(
+    value                String,
+    id_capture           Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_capture)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_capture)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE plugin
+(
+    value                String,
+    id_plugin            Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_plugin)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_plugin)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE organization_name
+(
+    value                String,
+    id_organization_name Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_organization_name)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_organization_name)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE organization_id
+(
+    value                String,
+    id_organization_id   Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_organization_id)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_organization_id)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE phone
+(
+    value                String,
+    id_phone             Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_phone)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_phone)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+CREATE TABLE social_id
+(
+    value                String,
+    id_social_id         Int64,
+    version              UInt64,
+    PROJECTION p_id (SELECT _part_offset ORDER BY id_social_id)
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (value, id_social_id)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 -- 2) link : une seule table pour tous les couples de nœuds, TYPÉS.
@@ -96,9 +188,9 @@ CREATE TABLE property
     node_type      Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
                          'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
                          'phone' = 8, 'social_id' = 9),
-    -- même id que fqdn_search.id_fqdn / ip_search.id_ip / link.id_1|id_2
+    -- même id que fqdn.id_fqdn / ip.id_ip / link.id_1|id_2
     id_node        Int64,
-    id_source      Int32,
+    id_source      Int64,
     -- renvoyé tel quel, jamais filtré : String compressé plutôt que JSON typé
     payload        String CODEC(ZSTD(3)),
     detection_date DateTime,

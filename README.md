@@ -6,7 +6,8 @@ Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
   500 000 IP, 1 000 000 liens = 2 000 000 lignes dans `link` (chaque lien est
   inséré dans les deux sens, 2 % des FQDN contiennent des "hot terms" :
   youtube, shop, bank, mail…).
-- **Schéma de production** : `fqdn_search` / `ip_search` / `link`
+- **Schéma de production** : une table de valeurs par type de nœud
+  (`fqdn`, `ip`, `application`, `plugin`, ...) / `link`
   (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, liens
   dupliqués dans les deux sens, `ReplacingMergeTree(version)`).
 
@@ -37,9 +38,9 @@ Fichiers reconnus (classification par nom) :
 
 | Fichier | Format | Destination |
 |---|---|---|
-| `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | `fqdn_search` / `ip_search` selon `type` |
+| `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | table du `type` (`fqdn`, `ip`, `application`, ...) |
 | `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
-| `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn_search` (cn + dns), `ip_search` |
+| `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
 streaming `clickhouse-client`, pas de parsing Python) → distribution
@@ -52,24 +53,25 @@ automatiquement avant le chargement.
 Choix d'import :
 - aucun id n'est calculé à partir d'une valeur : `node.csv` garde ses
   propres ids ; toute autre valeur fqdn/ip (`domains.json`, extrémités de
-  liens) est d'abord cherchée dans `fqdn_search` / `ip_search` et reprend
+  liens) est d'abord cherchée dans la table de son type et reprend
   l'id existant ; si elle est absente, elle reçoit un **nouvel id
   auto-incrémenté** à partir du `max(id)` du type déjà en base
-  (`max + 1`, `max + 2`, ...), avec `rank = 1000000`, `version = now()`.
+  (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = 1000000`
+  pour `fqdn` / `ip`).
   Un seul import à la fois (deux imports concurrents liraient le même max) ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
-  chaque extrémité (`type_1` / `type_2` = `fqdn` | `ip`) : résolution
-  `(type, valeur) → id` par jointure sur `fqdn_search` / `ip_search`, après
-  création des extrémités fqdn/ip inconnues (règle ci-dessus). Les liens
-  `cn ↔ dns` et `cn ↔ ip` de `domains.json` suivent le même chemin. Seuls
-  les autres types (`application`, `plugin`, ...), qui n'ont pas de table de
-  valeurs, restent ignorés et comptés pendant l'import.
+  chaque extrémité (`type_1` / `type_2`) : résolution `(type, valeur) → id`
+  par jointure sur la table du type, après création des extrémités
+  inconnues (règle ci-dessus). Les liens
+  `cn ↔ dns` et `cn ↔ ip` de `domains.json` suivent le même chemin. Seul
+  un type hors de l'`Enum8` (sans table) est ignoré, et compté pendant
+  l'import.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
   chaque lien résolu est inséré dans `link` **dans les deux sens** (voir la
-  section "Migration de `link_opt` vers `link`" plus bas pour le détail) ;
+  section "Table `link`" plus bas pour le détail) ;
 - `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
-  `ORDER BY rank`) ; `make migrate` applique la même règle aux données existantes ;
+  `ORDER BY rank`) ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
   (asynchrone) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).
@@ -86,35 +88,22 @@ docker exec -it bench_clickhouse clickhouse-client --user bench --password bench
 ```sql
 -- index de saut ngram : granules éludés, pas de scan complet
 EXPLAIN indexes = 1
-SELECT id_fqdn, value FROM fqdn_search WHERE value LIKE '%tube%' LIMIT 100;
+SELECT id_fqdn, value FROM fqdn WHERE value LIKE '%tube%' LIMIT 100;
 ```
 
 ## Recherche `LIKE '%…%'` triée par rank
 
 ```sql
-SELECT * FROM fqdn_search WHERE value LIKE '%google.com%' ORDER BY rank;
+SELECT * FROM fqdn WHERE value LIKE '%google.com%' ORDER BY rank;
 ```
 
-`fqdn_search` est triée par **nom de domaine inversé**
+`fqdn` est triée par **nom de domaine inversé**
 (`ORDER BY (reverse(value), id_fqdn)`) : tous les `*.google.com`,
 `google.com.br`… sont stockés côte à côte, donc l'index ngram ne garde que
 quelques blocs et `ORDER BY rank` — avec ou sans `LIMIT` — ne trie que les
-lignes trouvées. Triée par `id_fqdn` (ancien schéma), ces lignes étaient
-éparpillées (~1 par bloc) et chaque recherche triée relisait presque toute la
-table. La recherche par id (jointures) passe par la projection légère `p_id`.
-
-Migrer une base existante (copie à côté, table actuelle intacte ; prévoir
-de l'espace disque ≈ taille actuelle de la table et une à quelques heures
-pour des milliards de lignes ; pas d'import pendant la copie) :
-
-```bash
-make migrate        # sql/07_migrate_copy.sql : remplit fqdn_search_new, affiche les comptes
-make migrate-swap   # sql/08_migrate_swap.sql : bascule (ancienne → fqdn_search_old)
-```
-
-Retour arrière : `EXCHANGE TABLES fqdn_search AND fqdn_search_old;`.
-Libérer le disque une fois satisfait :
-`DROP TABLE fqdn_search_old SETTINGS max_table_size_to_drop = 0;`
+lignes trouvées. Triée par `id_fqdn`, ces lignes seraient éparpillées
+(~1 par bloc) et chaque recherche triée relirait presque toute la table.
+La recherche par id (jointures) passe par la projection légère `p_id`.
 
 ### Index texte exact
 
@@ -122,23 +111,17 @@ L'index ngram (filtre de Bloom) laisse passer beaucoup de faux positifs sur
 les vraies données : il garde ~73 % des blocs, alors que ~7 % contiennent le
 terme. L'index texte `idx_text` est exact. Essai sur 1/16 des données
 (`sql/test_text_index.sql`) : 9 051 → 1 656 blocs, 88 → 24 ms par
-recherche, mais ~30 Gio d'index par milliard de lignes.
-
-Base existante (sans copie, construction en arrière-plan, pas d'import
-pendant ce temps) :
-
-```bash
-make text-index   # = sql/09_add_text_index.sql
-```
+recherche, mais ~30 Gio d'index par milliard de lignes. Les deux index
+sont créés par le schéma (`make init`).
 
 L'index ngram est gardé pour l'instant. Après un import réussi avec l'index
 texte (pas d'erreur mémoire), il peut être supprimé :
-`ALTER TABLE fqdn_search DROP INDEX idx_ngram;`
-Retour arrière : `ALTER TABLE fqdn_search DROP INDEX idx_text;`
+`ALTER TABLE fqdn DROP INDEX idx_ngram;`
+Retour arrière : `ALTER TABLE fqdn DROP INDEX idx_text;`
 
 Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
-### Table `ip_search`
+### Table `ip`
 
 Même principe (projection `p_id`, rank 0 → 1 000 000), avec deux
 différences :
@@ -149,16 +132,18 @@ différences :
   les trigrammes sont présents dans presque tous les blocs, et l'index ne
   filtre rien (testé : `LIKE '%8.8.8%'` en 112 ms avec, 45 ms sans).
 
-```bash
-make migrate-ip        # sql/10_migrate_ip_copy.sql : remplit ip_search_new, affiche les comptes
-make migrate-ip-swap   # sql/11_migrate_ip_swap.sql : bascule (ancienne → ip_search_old)
-```
+### Tables des autres types de nœuds
 
-### Migration de `link_opt` vers `link` (liens typés)
+`application`, `capture`, `plugin`, `organization_name`, `organization_id`,
+`phone`, `social_id` : une table par type, même modèle que `ip`
+(`value`, `id_<type>`, `version`, projection `p_id`, tri par valeur) mais
+**sans `rank`**. Liste des types côté import : `NODE_TABLES` dans
+`scripts/import_data.py`.
 
-`link_opt` ne stockait que deux ids, sans savoir si chaque extrémité était
-un FQDN ou une IP (les ids ne sont uniques qu'à l'intérieur d'un type). La
-table `link` porte le type de chaque extrémité :
+### Table `link` (liens typés)
+
+Les ids ne sont uniques qu'à l'intérieur d'un type : `link` porte donc le
+type de chaque extrémité :
 
 - `(type_1, id_1, type_2, id_2)`, types en `Enum8` (`application`,
   `capture`, `fqdn`, `ip`, `plugin`, `organization_name`,
@@ -174,40 +159,11 @@ table `link` porte le type de chaque extrémité :
   les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
   Un simple filtre `type_1 = ... AND id_1 = ...` retrouve donc les voisins
-  des deux côtés, sans `UNION`. Coût disque équivalent à l'ancienne
-  projection (qui dupliquait déjà les mêmes colonnes) ; en contrepartie,
+  des deux côtés, sans `UNION`. Coût disque équivalent à une projection
+  inverse (qui dupliquerait les mêmes colonnes) ; en contrepartie,
   toute écriture sur `link` (update, suppression) doit traiter les deux
   lignes ensemble pour rester cohérente — rien ne les garde plus
   synchronisées automatiquement.
-
-La migration considère **tout le contenu de `link_opt` comme fqdn ↔ fqdn**
-et écrit les deux sens. Les liens qui étaient en réalité fqdn ↔ ip sont à
-réimporter pour être correctement typés.
-
-```bash
-make migrate-link        # sql/12_migrate_link_copy.sql : remplit link (2 sens), affiche les comptes
-make migrate-link-swap   # sql/13_migrate_link_swap.sql : link_opt → link_opt_old
-```
-
-Base dont `link` existe déjà mais à **sens unique** (schéma d'avant cette
-migration, avec projection `p_reverse`) : ajoute le sens manquant puis
-supprime la projection, devenue inutile. À lancer une seule fois, import et
-génération arrêtés pendant ce temps.
-
-```bash
-make migrate-link-bidir   # sql/15_migrate_link_bidirectional.sql
-```
-
-Base dont `link` est triée `(type_1, id_1, type_2, id_2)`, sans `source_id`
-(un seul lien gardé toutes sources confondues) : ClickHouse ne peut pas
-ajouter une colonne existante à `ORDER BY`, la table est donc recopiée.
-Les sources déjà fusionnées par les merges passés sont perdues : réimporter
-les liens après la bascule pour les retrouver.
-
-```bash
-make migrate-link-source        # sql/16_migrate_link_source_copy.sql : remplit link_new, affiche les comptes
-make migrate-link-source-swap   # sql/17_migrate_link_source_swap.sql : link → link_old, link_new → link
-```
 
 ### Table `property` (informations par nœud et par source)
 
@@ -217,10 +173,6 @@ stocké en `String` compressé ZSTD, renvoyé tel quel), `detection_date`,
 source remplace l'ancienne (pas d'historique). `node_type` utilise le même
 `Enum8` que `link` : `(node_type, id_node)` identifie un nœud.
 Projection légère `p_source` pour « tout ce qu'a produit la source X ».
-
-```bash
-make property   # sql/14_create_property.sql : crée la table (vide) sur une base existante
-```
 
 ```sql
 SELECT id_source, payload, detection_date FROM property FINAL

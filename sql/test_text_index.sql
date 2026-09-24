@@ -1,7 +1,7 @@
 -- ============================================================
--- ESSAI — index texte exact vs index ngram, sur 1/16 de fqdn_search
+-- ESSAI — index texte exact vs index ngram, sur 1/16 de fqdn
 -- ============================================================
--- Ne modifie PAS fqdn_search : copie 1/16 des lignes (~90 M) dans une table
+-- Ne modifie PAS fqdn : copie 1/16 des lignes (~90 M) dans une table
 -- d'essai qui porte les DEUX index, puis compare blocs lus, temps et taille.
 -- Durée : quelques minutes. Nettoyage à la fin : DROP TABLE test_text_index.
 -- Lancement (Linux, depuis le dossier du projet) :
@@ -11,7 +11,7 @@ DROP TABLE IF EXISTS test_text_index;
 CREATE TABLE test_text_index
 (
     value    String,
-    id_fqdn  Int32,
+    id_fqdn  Int64,
     rank     UInt32,
     version  UInt64,
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
@@ -21,7 +21,7 @@ ENGINE = ReplacingMergeTree(version)
 ORDER BY (reverse(value), id_fqdn);
 
 INSERT INTO test_text_index
-SELECT value, id_fqdn, rank, version FROM fqdn_search
+SELECT value, id_fqdn, rank, version FROM fqdn
 WHERE positiveModulo(id_fqdn, 16) = 0
 SETTINGS max_memory_usage = 11000000000;
 

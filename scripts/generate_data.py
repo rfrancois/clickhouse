@@ -57,11 +57,11 @@ def main() -> None:
     for i in range(1, N_FQDN + 1):
         rows.append((make_domain(rng, i), i, rng.randint(0, 1000), 1))
         if len(rows) >= BATCH:
-            client.insert("fqdn_search", rows,
+            client.insert("fqdn", rows,
                           column_names=["value", "id_fqdn", "rank", "version"])
             rows.clear()
     if rows:
-        client.insert("fqdn_search", rows,
+        client.insert("fqdn", rows,
                       column_names=["value", "id_fqdn", "rank", "version"])
 
     # ---------- IP ----------
@@ -71,11 +71,11 @@ def main() -> None:
         ip = str(ipaddress.IPv4Address(rng.randint(0x0A000001, 0xDFFFFFFF)))
         rows.append((ip, i, rng.randint(0, 1000), 1))
         if len(rows) >= BATCH:
-            client.insert("ip_search", rows,
+            client.insert("ip", rows,
                           column_names=["value", "id_ip", "rank", "version"])
             rows.clear()
     if rows:
-        client.insert("ip_search", rows,
+        client.insert("ip", rows,
                       column_names=["value", "id_ip", "rank", "version"])
 
     # ---------- LINKS (fqdn <-> ip, typés, ids Int64) ----------
@@ -102,7 +102,7 @@ def main() -> None:
                       column_names=["type_1", "id_1", "type_2", "id_2",
                                     "source_id", "detection_date", "version"])
 
-    for t in ("fqdn_search", "ip_search", "link"):
+    for t in ("fqdn", "ip", "link"):
         n = client.command(f"SELECT count() FROM {t}")
         print(f"  {t}: {n:,} lignes")
     print("OK — données chargées dans les tables optimisées.")

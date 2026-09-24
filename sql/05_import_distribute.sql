@@ -1,12 +1,12 @@
 -- ============================================================
--- DISTRIBUTION staging → tables optimisées — partie NODE / DOMAINS
--- (fqdn_search / ip_search ; les tables naïves ne sont plus alimentées)
+-- DISTRIBUTION staging → tables optimisées — partie DOMAINS
 -- ============================================================
--- Seul node.csv est inséré directement ici (il fournit ses propres ids).
+-- node.csv (qui fournit ses propres ids) est distribué par
+-- scripts/import_data.py (distribute_nodes), une table par type de nœud.
 -- domains.json n'a pas d'id : ses valeurs (cn, dns, ip) sont versées dans
 -- stg_value et ses liens (cn ↔ dns, cn ↔ ip) dans stg_link, pour être traités
 -- comme les liens CSV par scripts/import_data.py (distribute_links) :
---   * valeur déjà connue de fqdn_search / ip_search → on reprend son id ;
+--   * valeur déjà connue de fqdn / ip → on reprend son id ;
 --   * valeur inconnue → nouvel id auto-incrémenté à partir du max(id) du type,
 --     rank = 1000000, version = now().
 -- Cette résolution est faite en TRANCHES côté Python, sinon les jointures sur
@@ -23,28 +23,8 @@ SET max_bytes_before_external_group_by = 536870912;  -- 512 Mio → spill disque
 SET max_bytes_before_external_sort = 536870912;      -- 512 Mio → spill disque
 SET use_skip_indexes = 0;                            -- l'index ngram n'aide pas ici, il coûte de la RAM
 
--- ---------- 1) node.csv → fqdn / ip ----------
-
-INSERT INTO fqdn_search (value, id_fqdn, rank, version)
-SELECT value,
-       toInt32OrZero(id),
-       if(toUInt32OrZero(rank) = 0, 1000000, toUInt32OrZero(rank)),
-       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)),
-                toUnixTimestamp(now()))
-FROM stg_node
-WHERE lower(node_type) = 'fqdn' AND value != '';
-
-INSERT INTO ip_search (value, id_ip, rank, version)
-SELECT value,
-       toInt32OrZero(id),
-       if(toUInt32OrZero(rank) = 0, 1000000, toUInt32OrZero(rank)),
-       coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)),
-                toUnixTimestamp(now()))
-FROM stg_node
-WHERE lower(node_type) = 'ip' AND value != '';
-
--- ---------- 2) domains.json → valeurs sans id (stg_value) ----------
--- Pas d'insert direct dans fqdn_search / ip_search : l'id est attribué plus
+-- ---------- 1) domains.json → valeurs sans id (stg_value) ----------
+-- Pas d'insert direct dans fqdn / ip : l'id est attribué plus
 -- tard (auto-incrément), après résolution contre les valeurs existantes.
 
 INSERT INTO stg_value (node_type, value)
@@ -62,7 +42,7 @@ SELECT 'ip', ip
 FROM stg_domain
 WHERE ip IS NOT NULL AND ip != '';
 
--- ---------- 2b) domains.json → liens cn ↔ dns et cn ↔ ip (stg_link) ----------
+-- ---------- 1b) domains.json → liens cn ↔ dns et cn ↔ ip (stg_link) ----------
 -- Un seul sens ici : distribute_links() insère chaque lien résolu dans les
 -- DEUX sens dans link. Dates vides → now(), source 0. Auto-liens (dns == cn)
 -- filtrés.
@@ -82,9 +62,8 @@ SELECT cn, ip, 'fqdn', 'ip', '0', '', ''
 FROM stg_domain
 WHERE cn IS NOT NULL AND cn != '' AND ip IS NOT NULL AND ip != '';
 
--- ---------- 3) staging node / domains nettoyé ----------
+-- ---------- 2) staging domains nettoyé ----------
 -- stg_link et stg_value sont conservés : consommés ensuite par
 -- distribute_links() côté Python.
 
-DROP TABLE stg_node;
 DROP TABLE stg_domain;

@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
 
-.PHONY: all up wait init migrate migrate-swap migrate-ip migrate-ip-swap migrate-link migrate-link-swap migrate-link-bidir property text-index upgrade generate test import pdf down clean
+.PHONY: all up wait init migrate migrate-swap migrate-ip migrate-ip-swap migrate-link migrate-link-swap migrate-link-bidir migrate-link-source migrate-link-source-swap property text-index upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -51,6 +51,14 @@ migrate-link-swap:
 # dupliqués dans les deux sens, projection supprimée. À lancer une seule fois.
 migrate-link-bidir:
 	$(CLIENT) < sql/15_migrate_link_bidirectional.sql
+
+# source_id ajouté à la clé de tri de link (une ligne par lien et par source) :
+# copie dans link_new, puis bascule (ancienne gardée sous link_old)
+migrate-link-source:
+	$(CLIENT) < sql/16_migrate_link_source_copy.sql
+
+migrate-link-source-swap:
+	$(CLIENT) < sql/17_migrate_link_source_swap.sql
 
 # Création de la table property (payload par nœud et par source), vide
 property:

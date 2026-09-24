@@ -81,10 +81,12 @@ ENGINE = ReplacingMergeTree(version)
 -- entier par ALTER TABLE link DROP PARTITION 'xxx'
 PARTITION BY type_1
 -- index primaire (en RAM) réduit à ce qu'on filtre vraiment ; le tri complet
--- reste la clé de déduplication (un couple ORIENTÉ = une ligne ; A→B et B→A
--- sont deux lignes distinctes, dédupliquées chacune de son côté)
+-- reste la clé de déduplication : un couple ORIENTÉ PAR SOURCE = une ligne
+-- (A→B et B→A sont deux lignes distinctes ; un même lien vu par deux sources
+-- aussi). Une nouvelle détection d'une même source remplace l'ancienne,
+-- comme dans property. Voisins distincts : DISTINCT / GROUP BY à la lecture.
 PRIMARY KEY (type_1, id_1)
-ORDER BY (type_1, id_1, type_2, id_2);
+ORDER BY (type_1, id_1, type_2, id_2, source_id);
 
 -- 3) property : les informations (payload) de chaque nœud, par source.
 --    (node_type, id_node) identifie le nœud, comme dans link.

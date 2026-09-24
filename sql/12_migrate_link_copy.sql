@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS link
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY type_1
 PRIMARY KEY (type_1, id_1)
-ORDER BY (type_1, id_1, type_2, id_2);
+ORDER BY (type_1, id_1, type_2, id_2, source_id);
 
 -- Copie en 16 tranches, dans les deux sens. positiveModulo et non % : les ids
 -- peuvent être négatifs.

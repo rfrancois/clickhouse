@@ -161,7 +161,11 @@ table `link` porte le type de chaque extrémité :
   `organization_id`, `phone`, `social_id`) ; un nouveau type s'ajoute à la
   fin des deux `Enum8` (métadonnées seules) ;
 - une seule table pour tous les couples de types, triée
-  `(type_1, id_1, type_2, id_2)`, `PARTITION BY type_1` ;
+  `(type_1, id_1, type_2, id_2, source_id)`, `PARTITION BY type_1` : une
+  ligne par lien orienté **et par source** (un lien vu par deux sources
+  garde ses deux lignes ; une nouvelle détection d'une même source remplace
+  l'ancienne). Pour des voisins distincts, `DISTINCT` / `GROUP BY` à la
+  lecture ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
   les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
@@ -188,6 +192,17 @@ génération arrêtés pendant ce temps.
 
 ```bash
 make migrate-link-bidir   # sql/15_migrate_link_bidirectional.sql
+```
+
+Base dont `link` est triée `(type_1, id_1, type_2, id_2)`, sans `source_id`
+(un seul lien gardé toutes sources confondues) : ClickHouse ne peut pas
+ajouter une colonne existante à `ORDER BY`, la table est donc recopiée.
+Les sources déjà fusionnées par les merges passés sont perdues : réimporter
+les liens après la bascule pour les retrouver.
+
+```bash
+make migrate-link-source        # sql/16_migrate_link_source_copy.sql : remplit link_new, affiche les comptes
+make migrate-link-source-swap   # sql/17_migrate_link_source_swap.sql : link → link_old, link_new → link
 ```
 
 ### Table `property` (informations par nœud et par source)

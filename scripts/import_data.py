@@ -12,14 +12,17 @@ Fichiers reconnus (classification par nom) :
                    (';' + quotes, guillemets internes échappés en \\")
   - *.json/.json.gz : {"cn":..., "dns":[...]|null, "ip":...|null}  (JSONEachRow)
 
-Pipeline (aucun parsing Python : streaming direct vers clickhouse-client,
-tient le milliard de lignes) :
+Pipeline (aucun parsing Python : streaming direct vers ClickHouse, tient le
+milliard de lignes) :
   1. extraction du .zip le cas échéant
   2. création du schéma optimisé si absent (équivalent de `make init`,
      jamais de DROP sur un schéma existant)
   3. création des tables de staging (sql/04_import_staging.sql)
-  4. chargement brut de chaque fichier (FORMAT CSV / JSONEachRow, gunzip
-     à la volée si nécessaire)
+  4. chargement brut de chaque fichier (gunzip à la volée si nécessaire) :
+     - CSV : un seul INSERT en streaming via clickhouse-client ;
+     - JSON : découpé en lots de IMPORT_CHUNK_LINES lignes (10 000 par
+       défaut), un INSERT par lot via l'interface HTTP (port 8123), avec
+       progression : mémoire bornée côté serveur, même sur un fichier énorme
   5. distribution vers les tables optimisées :
      - node.csv → <type> selon le type (fqdn, ip, application,
        plugin, ... cf. NODE_TABLES), avec ses propres ids (distribute_nodes)
@@ -41,6 +44,7 @@ link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 dans les deux sens. Toute future écriture sur link (update, suppression) doit
 donc traiter les deux lignes ensemble pour rester cohérente.
 """
+import http.client
 import os
 import shutil
 import subprocess
@@ -50,6 +54,7 @@ import time
 import zipfile
 import zlib
 from pathlib import Path
+from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parent.parent
 SQL_STAGING = ROOT / "sql" / "04_import_staging.sql"
@@ -74,12 +79,30 @@ RANKED = {"fqdn", "ip"}
 NEW_RANK = 1000000  # rank des nœuds sans rank connu (fin de ORDER BY rank)
 TYPES_SQL = ", ".join(f"'{t}'" for t in NODE_TABLES)
 
+USER, PASSWORD = "chuser", "Royal15Raccoon"
 CLIENT = ["docker", "exec", "-i", "ch_container", "clickhouse-client",
-          "--user", "chuser", "--password", "Royal15Raccoon"]
+          "--user", USER, "--password", PASSWORD]
 
-# tolérance aux lignes malformées (données réelles)
-TOLER = ["--input_format_allow_errors_num=1000",
-         "--input_format_allow_errors_ratio=0.001"]
+# Interface HTTP (port exposé par docker-compose.yml) : chargement des JSON
+# par lots, sans lancer un `docker exec` par lot.
+HTTP_HOST = os.environ.get("CLICKHOUSE_HOST", "localhost")
+HTTP_PORT = int(os.environ.get("CLICKHOUSE_HTTP_PORT", "8123"))
+
+# tolérance aux lignes malformées (données réelles). Pour les JSON chargés par
+# lots, elle s'applique à chaque lot.
+TOLER_SETTINGS = {"input_format_allow_errors_num": 1000,
+                  "input_format_allow_errors_ratio": 0.001}
+TOLER = [f"--{k}={v}" for k, v in TOLER_SETTINGS.items()]
+
+# Lignes par INSERT pour les JSON (surchargeable via IMPORT_CHUNK_LINES).
+# Chaque lot crée une part dans stg_domain, fusionnée en arrière-plan : des
+# lots plus gros (100000) vont plus vite, au prix d'un peu plus de RAM.
+CHUNK_LINES = int(os.environ.get("IMPORT_CHUNK_LINES", "10000"))
+# Lot refusé faute de ressources (rien n'est inséré : un lot = un bloc =
+# une part, atomique) → on attend et on renvoie le même lot.
+#   241 MEMORY_LIMIT_EXCEEDED, 252 TOO_MANY_PARTS (merges en retard)
+RETRY_CODES = {"241", "252"}
+RETRIES = 8
 
 # Les tables de staging (stg_domain surtout) peuvent dépasser la limite de
 # sécurité par défaut (50 Gio) : on lève le garde-fou pour les DROP du script,
@@ -107,8 +130,42 @@ LINK_SLICES = int(os.environ.get("IMPORT_LINK_SLICES", "16"))
 FREE_WARN_GIB = 15
 
 
+_progress_open = False  # ligne de progression en cours (terminal, sans \n)
+
+
 def log(msg: str) -> None:
+    global _progress_open
+    if _progress_open:
+        print(flush=True)
+        _progress_open = False
     print(msg, flush=True)
+
+
+def duration(s: float) -> str:
+    s = int(s)
+    if s >= 3600:
+        return f"{s // 3600} h {s % 3600 // 60:02d} min"
+    if s >= 60:
+        return f"{s // 60} min {s % 60:02d} s"
+    return f"{s} s"
+
+
+def progress(done: int, total: int, lines: int, elapsed: float,
+             end: bool = False) -> None:
+    """Ligne de progression (réécrite sur place dans un terminal).
+    done / total : octets lus du fichier BRUT (compressé si .gz)."""
+    global _progress_open
+    pct = 100 * done / total if total else 100.0
+    rate = lines / elapsed if elapsed > 0 else 0
+    msg = (f"  [{pct:5.1f} %] {lines:,} lignes · {rate:,.0f} lignes/s · "
+           f"{duration(elapsed)}")
+    if not end and done:
+        msg += f" · reste ~{duration(elapsed * (total - done) / done)}"
+    if sys.stdout.isatty():
+        print("\r" + msg.ljust(100), end="\n" if end else "", flush=True)
+        _progress_open = not end
+    else:
+        print(msg, flush=True)
 
 
 def query(sql: str, mem: bool = False) -> str:
@@ -368,7 +425,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
 
 
 def iter_blocks(path: Path):
-    """Itère les blocs du fichier, décompressés à la volée si gzip.
+    """Itère les blocs du fichier, décompressés à la volée si gzip, sous la
+    forme (bloc, octets lus du fichier brut) — pour la progression.
 
     Tolérant aux archives .gz tronquées : tout ce qui est lisible est
     émis (contrairement à gzip.GzipFile.read qui perd le bloc en cours),
@@ -381,7 +439,7 @@ def iter_blocks(path: Path):
                 buf = f.read(1024 * 1024)
                 if not buf:
                     break
-                yield buf
+                yield buf, f.tell()
             return
         d = zlib.decompressobj(31)  # 16 + 15 = conteneur gzip
         truncated = False
@@ -395,7 +453,7 @@ def iter_blocks(path: Path):
                 truncated = True
                 break
             if out:
-                yield out
+                yield out, f.tell()
         if not d.eof:
             truncated = True
         if truncated:
@@ -403,6 +461,92 @@ def iter_blocks(path: Path):
                 "     → les données de fin de fichier sont perdues.\n"
                 "     → re-télécharge le fichier si possible "
                 "(gzip -t pour vérifier).")
+
+
+def iter_line_chunks(path: Path, n: int):
+    """Découpe le fichier (décompressé à la volée) en lots de n lignes
+    complètes. Émet (lot en bytes, nb de lignes, octets lus du fichier brut).
+    Seuls un bloc de 1 Mio et un lot sont en mémoire à la fois."""
+    pending = b""
+    lines = []
+    pos = 0
+    for block, pos in iter_blocks(path):
+        parts = (pending + block).split(b"\n")
+        pending = parts.pop()  # dernière ligne, incomplète
+        lines.extend(parts)
+        while len(lines) >= n:
+            yield b"\n".join(lines[:n]) + b"\n", n, pos
+            del lines[:n]
+    if pending.strip():
+        lines.append(pending)
+    if lines:
+        yield b"\n".join(lines) + b"\n", len(lines), pos
+
+
+class HttpInsert:
+    """INSERT répétés dans une table via l'interface HTTP de ClickHouse
+    (connexion keep-alive réutilisée d'un lot à l'autre)."""
+
+    def __init__(self, table: str, fmt: str, settings: dict):
+        self.path = "/?" + urlencode(
+            {"query": f"INSERT INTO {table} FORMAT {fmt}", **settings})
+        self.headers = {"X-ClickHouse-User": USER,
+                        "X-ClickHouse-Key": PASSWORD,
+                        "Content-Type": "application/octet-stream"}
+        self.conn = None
+
+    def close(self) -> None:
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+
+    def send(self, body: bytes) -> None:
+        for attempt in range(RETRIES):
+            try:
+                if self.conn is None:
+                    self.conn = http.client.HTTPConnection(
+                        HTTP_HOST, HTTP_PORT, timeout=3600)
+                self.conn.request("POST", self.path, body, self.headers)
+                r = self.conn.getresponse()
+                msg = r.read().decode("utf-8", "replace").strip()
+            except (OSError, http.client.HTTPException) as e:
+                # pas de nouvel essai : on ne sait pas si le lot est passé
+                self.close()
+                sys.exit(f"ClickHouse HTTP injoignable ({HTTP_HOST}:{HTTP_PORT}) : "
+                         f"{e}\n  → le port 8123 est-il exposé ? (docker-compose.yml)")
+            if r.status == 200:
+                return
+            code = r.getheader("X-ClickHouse-Exception-Code", "")
+            if code not in RETRY_CODES:
+                raise RuntimeError(f"INSERT refusé (HTTP {r.status}) : {msg[:2000]}")
+            wait = min(60, 2 ** attempt)
+            log(f"  lot refusé (code {code}), nouvel essai dans {wait} s : "
+                f"{msg.splitlines()[0][:200] if msg else ''}")
+            time.sleep(wait)
+        raise RuntimeError(f"INSERT refusé après {RETRIES} essais : {msg[:2000]}")
+
+
+def load_chunked(path: Path, table: str, fmt: str,
+                 n: int = CHUNK_LINES) -> None:
+    """Charge un fichier à une ligne par enregistrement (JSONEachRow) par
+    lots de n lignes, un INSERT HTTP par lot, avec progression."""
+    total = path.stat().st_size
+    ins = HttpInsert(table, fmt, TOLER_SETTINGS)
+    lines = 0
+    pos = 0
+    t0 = last = time.monotonic()
+    every = 1 if sys.stdout.isatty() else 30
+    try:
+        for body, cnt, pos in iter_line_chunks(path, n):
+            ins.send(body)
+            lines += cnt
+            now = time.monotonic()
+            if now - last >= every:
+                progress(pos, total, lines, now - t0)
+                last = now
+    finally:
+        ins.close()
+    progress(pos, total, lines, time.monotonic() - t0, end=True)
 
 
 def classify(path: Path):
@@ -499,6 +643,12 @@ def main() -> None:
             size = f.stat().st_size / 2**20
             log(f"Chargement {f.name} ({size:.1f} Mio) → {table} [{fmt}]...")
             t = time.monotonic()
+            if fmt == "JSONEachRow":
+                # une ligne = un enregistrement : découpage en lots sans risque
+                load_chunked(f, table, fmt)
+                n = query(f"SELECT count() FROM {table}")
+                log(f"  {int(n):,} lignes en staging en {time.monotonic() - t:.0f} s")
+                continue
             cmd = CLIENT + TOLER + settings \
                 + ["--query", f"INSERT INTO {table} FORMAT {fmt}"]
             # ATTENTION : on ne peut PAS passer un gzip.GzipFile en
@@ -512,7 +662,7 @@ def main() -> None:
             # (texte \r), un '\r' brut ne peut être qu'une fin de ligne.
             strip_cr = table == "stg_property"
             try:
-                for block in iter_blocks(f):
+                for block, _ in iter_blocks(f):
                     proc.stdin.write(block.replace(b"\r", b"") if strip_cr
                                      else block)
                 proc.stdin.close()

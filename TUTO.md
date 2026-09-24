@@ -42,7 +42,7 @@ docker compose up -d
 python3 -m venv .venv
 .venv/bin/pip install clickhouse-connect matplotlib numpy
 
-docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery < sql/02_optimized.sql
+docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery < sql/02_optimized.sql
 
 .venv/bin/python3 scripts/generate_data.py   # données factices
 .venv/bin/python3 scripts/test.py            # test rapide
@@ -56,4 +56,4 @@ make down    # stoppe le conteneur (données conservées)
 make clean   # stoppe + supprime le volume de données et le venv
 ```
 
-Identifiants ClickHouse : `bench` / `bench` — HTTP `localhost:8123`, natif `localhost:9000`.
+Identifiants ClickHouse : `chuser` / `Royal15Raccoon` — HTTP `localhost:8123`, natif `localhost:9000`.

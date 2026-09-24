@@ -3,13 +3,13 @@ services:
     # Version figée : 'latest' restait bloqué sur l'image téléchargée la
     # première fois (24.8). 26.x requis pour la projection p_id (_part_offset).
     image: clickhouse/clickhouse-server:26.7
-    container_name: bench_clickhouse
+    container_name: ch_container
     ports:
       - "8123:8123"   # HTTP
       - "9000:9000"   # native
     environment:
-      CLICKHOUSE_USER: bench
-      CLICKHOUSE_PASSWORD: bench
+      CLICKHOUSE_USER: chuser
+      CLICKHOUSE_PASSWORD: Royal15Raccoon
       CLICKHOUSE_DB: default
     ulimits:
       nofile:
@@ -17,7 +17,7 @@ services:
         hard: 262144
     volumes:
       - ch_data:/var/lib/clickhouse
-      - ./docker/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+      # - ./docker/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
 
 volumes:
   ch_data:

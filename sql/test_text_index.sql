@@ -5,7 +5,7 @@
 -- d'essai qui porte les DEUX index, puis compare blocs lus, temps et taille.
 -- Durée : quelques minutes. Nettoyage à la fin : DROP TABLE test_text_index.
 -- Lancement (Linux, depuis le dossier du projet) :
---   docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery --echo --format PrettyCompactMonoBlock < sql/test_text_index.sql > test_text_index.txt 2>&1
+--   docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery --echo --format PrettyCompactMonoBlock < sql/test_text_index.sql > test_text_index.txt 2>&1
 
 DROP TABLE IF EXISTS test_text_index;
 CREATE TABLE test_text_index

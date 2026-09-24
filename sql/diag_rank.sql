@@ -3,7 +3,7 @@
 -- ============================================================
 -- Lecture seule : ne modifie rien. Durée : quelques dizaines de secondes.
 -- Lancement (Linux, depuis le dossier du projet) :
---   docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery --echo --format PrettyCompactMonoBlock < sql/diag_rank.sql > diag_rank.txt 2>&1
+--   docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery --echo --format PrettyCompactMonoBlock < sql/diag_rank.sql > diag_rank.txt 2>&1
 -- Puis envoyer diag_rank.txt.
 
 -- 1) Serveur

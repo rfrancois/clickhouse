@@ -11,8 +11,8 @@ import clickhouse_connect
 
 HOST = "localhost"
 PORT = 8123
-USER = "bench"
-PASSWORD = "bench"
+USER = "chuser"
+PASSWORD = "Royal15Raccoon"
 
 TERM = "youtube"
 LIMIT = 100

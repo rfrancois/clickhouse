@@ -13,7 +13,7 @@ import random
 import ipaddress
 import clickhouse_connect
 
-HOST, PORT, USER, PASSWORD = "localhost", 8123, "bench", "bench"
+HOST, PORT, USER, PASSWORD = "localhost", 8123, "chuser", "Royal15Raccoon"
 N_FQDN = 500_000
 N_IP = 500_000
 N_LINKS = 1_000_000

@@ -1,5 +1,5 @@
 PYTHON := python3
-CLIENT := docker exec -i bench_clickhouse clickhouse-client --user bench --password bench --multiquery
+CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
 .PHONY: all up wait init upgrade generate test import pdf down clean
 
@@ -10,7 +10,7 @@ up:
 
 wait:
 	@echo "Attente de ClickHouse..."
-	@until docker exec bench_clickhouse clickhouse-client --user bench --password bench -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done
+	@until docker exec ch_container clickhouse-client --user chuser --password Royal15Raccoon -q "SELECT 1" >/dev/null 2>&1; do sleep 1; done
 	@echo "ClickHouse prêt."
 
 init:
@@ -22,7 +22,7 @@ upgrade:
 	docker compose pull
 	docker compose up -d
 	@$(MAKE) --no-print-directory wait
-	@docker exec bench_clickhouse clickhouse-client --user bench --password bench -q "SELECT 'ClickHouse ' || version()"
+	@docker exec ch_container clickhouse-client --user chuser --password Royal15Raccoon -q "SELECT 'ClickHouse ' || version()"
 
 generate: .venv
 	$(PYTHON) scripts/generate_data.py

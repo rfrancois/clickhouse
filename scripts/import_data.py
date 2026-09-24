@@ -67,8 +67,8 @@ RANKED = {"fqdn", "ip"}
 NEW_RANK = 1000000  # rank des nœuds sans rank connu (fin de ORDER BY rank)
 TYPES_SQL = ", ".join(f"'{t}'" for t in NODE_TABLES)
 
-CLIENT = ["docker", "exec", "-i", "bench_clickhouse", "clickhouse-client",
-          "--user", "bench", "--password", "bench"]
+CLIENT = ["docker", "exec", "-i", "ch_container", "clickhouse-client",
+          "--user", "chuser", "--password", "Royal15Raccoon"]
 
 # tolérance aux lignes malformées (données réelles)
 TOLER = ["--input_format_allow_errors_num=1000",
@@ -375,7 +375,7 @@ def main() -> None:
     except subprocess.CalledProcessError as e:
         sys.exit("ClickHouse injoignable.\n"
                  f"  {e.stderr.strip() or e}\n"
-                 "  → vérifie le conteneur : docker ps | grep bench_clickhouse\n"
+                 "  → vérifie le conteneur : docker ps | grep ch_container\n"
                  "  → puis relance-le si besoin : make up")
 
     # Schéma optimisé requis : créé ici si `make init` n'a jamais été lancé.

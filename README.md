@@ -18,7 +18,7 @@ cd bench
 
 make all          # docker + schéma + données factices de test
 # ou étape par étape :
-make up wait      # démarre ClickHouse (ports 8123/9000, user/pass bench/bench)
+make up wait      # démarre ClickHouse (ports 8123/9000, user/pass)
 make init         # crée le schéma optimisé
 make generate     # insère 500k FQDN / 500k IP / 1M liens factices
 make test         # test rapide : LIKE + jointure sur les tables optimisées
@@ -82,7 +82,7 @@ importé, les doublons seront fusionnés dans les tables optimisées.
 Tester une requête à la main :
 
 ```bash
-docker exec -it bench_clickhouse clickhouse-client --user bench --password bench
+docker exec -it ch_container clickhouse-client --user chuser --password Royal15Raccoon
 ```
 
 ```sql

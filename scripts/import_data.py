@@ -26,12 +26,15 @@ tient le milliard de lignes) :
      - properties.csv → property, id_node déjà numérique, sans résolution
        (distribute_properties)
      - domains.json → valeurs (stg_value) et liens cn ↔ dns / cn ↔ ip
-       (stg_link), sans id (sql/05_import_distribute.sql)
+       (stg_link), sans id (sql/05_import_distribute.sql), après
+       normalisation et validation de chaque valeur (données non fiables :
+       un cn ou dns qui est une IP est typé ip, jamais versé dans fqdn ;
+       wildcards, IP non routables, noms invalides rejetés et comptés)
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
        Docker modeste) : résolution valeur → id ; toute valeur absente de
        sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
        type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
-       DANS LES DEUX SENS
+       DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même)
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 (A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
@@ -195,6 +198,27 @@ def distribute_properties() -> None:
     query("DROP TABLE IF EXISTS stg_property")
 
 
+def report_domains() -> None:
+    """Affiche les valeurs de domains.json rejetées par la validation de
+    sql/05_import_distribute.sql (étape 0), par champ et par raison, puis
+    supprime stg_domain_norm."""
+    if query("EXISTS TABLE stg_domain_norm") != "1":
+        return
+    rows = query(
+        "SELECT field, reason, count() FROM ("
+        " SELECT 'ip' AS field, ip.1 AS reason FROM stg_domain_norm"
+        " UNION ALL SELECT 'cn', cn.1 FROM stg_domain_norm"
+        " UNION ALL SELECT 'dns', arrayJoin(dns).1 FROM stg_domain_norm"
+        ") WHERE startsWith(reason, 'x_') GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV",
+        mem=True)
+    if rows:
+        log("Valeurs de domains.json rejetées (ni nœud ni lien) :")
+        for line in rows.splitlines():
+            field, reason, cnt = line.split("\t")
+            log(f"  {field:<3} {reason[2:]:<12} : {int(cnt):,}")
+    query("DROP TABLE IF EXISTS stg_domain_norm")
+
+
 def distribute_links(n: int = LINK_SLICES) -> None:
     """Attribue les ids manquants puis résout stg_link → link, en N tranches
     (empreinte mémoire bornée).
@@ -297,7 +321,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
 
     # 3b — réécriture des liens avec les ids, tranche par tranche. Table link
     # sans projection inverse (cf. 02_optimized.sql) : chaque lien résolu est
-    # inséré dans les DEUX sens (n1→n2 et n2→n1).
+    # inséré dans les DEUX sens (n1→n2 et n2→n1). Auto-liens (même type et
+    # même id des deux côtés : fqdn ↔ lui-même, ip ↔ elle-même) écartés.
     t = time.monotonic()
     for k in range(n):
         base = (
@@ -305,7 +330,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
             "lower(type_1) AS t1, lower(type_2) AS t2 FROM stg_link "
             f"WHERE cityHash64(id_node_1, id_node_2) % {n} = {k}) AS l "
             "INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1 "
-            "INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2"
+            "INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2 "
+            "WHERE NOT (l.t1 = l.t2 AND n1.id = n2.id)"
         )
         query(
             "INSERT INTO link "
@@ -331,6 +357,11 @@ def distribute_links(n: int = LINK_SLICES) -> None:
         mem=True))
     log(f"  liens résolus : {resolus:,} / {staged:,} "
         f"(ignorés, nœud inconnu : {staged - resolus:,})")
+    autoliens = int(query(
+        "SELECT count() FROM stg_link "
+        "WHERE lower(type_1) = lower(type_2) AND id_node_1 = id_node_2"))
+    if autoliens:
+        log(f"  auto-liens ignorés (nœud lié à lui-même) : {autoliens:,}")
 
     for tbl in ("tmp_node_map", "tmp_link_values", "stg_link", "stg_value"):
         query(f"DROP TABLE IF EXISTS {tbl}")
@@ -504,6 +535,7 @@ def main() -> None:
             distribute_nodes()  # node.csv → <type>
             distribute_properties()  # properties.csv → property
             run_sql_file(SQL_DISTRIBUTE)  # domains.json → stg_value / stg_link
+            report_domains()  # valeurs de domains.json rejetées
             distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
         finally:
             query("SYSTEM START MERGES")

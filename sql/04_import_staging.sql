@@ -8,6 +8,7 @@
 DROP TABLE IF EXISTS stg_node;
 DROP TABLE IF EXISTS stg_link;
 DROP TABLE IF EXISTS stg_domain;
+DROP TABLE IF EXISTS stg_domain_norm;
 DROP TABLE IF EXISTS stg_value;
 DROP TABLE IF EXISTS stg_property;
 
@@ -63,6 +64,19 @@ CREATE TABLE stg_domain
     cn  Nullable(String),
     dns Array(Nullable(String)),
     ip  Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY tuple();
+
+-- domains.json après nettoyage / validation (05_import_distribute.sql) :
+-- chaque valeur devient (type, valeur normalisée). type 'fqdn' / 'ip' =
+-- valeur retenue ; 'x_…' = valeur REJETÉE (raison), comptée puis écartée par
+-- scripts/import_data.py (report_domains) ; '' = valeur absente.
+CREATE TABLE stg_domain_norm
+(
+    ip  Tuple(String, String),
+    cn  Tuple(String, String),
+    dns Array(Tuple(String, String))
 )
 ENGINE = MergeTree
 ORDER BY tuple();

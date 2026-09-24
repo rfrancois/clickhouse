@@ -41,7 +41,7 @@ Fichiers reconnus (classification par nom) :
 | `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | table du `type` (`fqdn`, `ip`, `application`, ...) |
 | `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
 | `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
-| `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` |
+| `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` (ip, et cn / dns qui sont des IP) |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
 streaming `clickhouse-client`, pas de parsing Python) → distribution
@@ -66,11 +66,25 @@ Choix d'import :
   inconnues (règle ci-dessus). Les liens
   `cn ↔ dns` et `cn ↔ ip` de `domains.json` suivent le même chemin. Seul
   un type hors de l'`Enum8` (sans table) est ignoré, et compté pendant
-  l'import.
+  l'import. Les auto-liens (même type et même valeur / id des deux côtés,
+  ex. `cn` identique à `ip`) sont écartés, et comptés.
   La jointure utilise `join_algorithm = 'partial_merge'` (tri-fusion avec
   débordement disque) pour tenir en mémoire à très grande volumétrie ;
   chaque lien résolu est inséré dans `link` **dans les deux sens** (voir la
   section "Table `link`" plus bas pour le détail) ;
+- `domains.json` **n'est pas fiable** : chaque valeur (`ip`, `cn`, entrées
+  de `dns`) est normalisée puis validée avant usage
+  (`sql/05_import_distribute.sql`, étape 0) :
+  - normalisation : espaces, minuscules, point final retirés ; IPv6 en forme
+    canonique ; doublons de `dns` supprimés ;
+  - le type vient de la **forme** de la valeur : un `cn` / `dns` qui est
+    une IP va dans `ip`, jamais dans `fqdn` ; le champ `ip` doit être une IP ;
+  - rejetés (ni nœud ni lien, comptés par champ et raison pendant
+    l'import) : wildcards (`*.x.com`), IP jamais significatives (`0.0.0.0/8`,
+    `127/8`, `169.254/16`, multicast / réservé / broadcast, `::`, `::1`,
+    `fe80::/10`, `ff00::/8`), noms d'hôte invalides (`localhost`, espaces,
+    `@`, `/`, `CN=…`, label > 63 caractères, nom > 253, TLD numérique) ;
+  - les IP privées (`10/8`, `192.168/16`...) sont **conservées** ;
 - `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
   `ORDER BY rank`) ;
 - `properties.csv` référence les nœuds par leur **id** (pas par valeur) :

@@ -36,11 +36,12 @@ milliard de lignes) :
        routables, noms invalides rejetés et comptés), puis valeurs
        (stg_value) et liens cn ↔ dns / cn ↔ ip (stg_link), sans id
        (sql/06_import_domains.sql)
-     - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
+     - puis distribute_links, en tranches (pour tenir en RAM sur une VM
        Docker modeste) : résolution valeur → id ; toute valeur absente de
        sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
        type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
-       DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même)
+       DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même).
+       Reprenable tranche par tranche (make import-resume).
 
 Reprise : chaque étape de distribution ne s'exécute que si sa table de
 staging d'entrée existe encore, et la supprime une fois finie. Après un
@@ -69,8 +70,11 @@ ROOT = Path(__file__).resolve().parent.parent
 SQL_STAGING = ROOT / "sql" / "04_import_staging.sql"
 SQL_NORMALIZE = ROOT / "sql" / "05_import_normalize.sql"
 SQL_DOMAINS = ROOT / "sql" / "06_import_domains.sql"
+# tables de travail d'un import (staging + intermédiaires de distribute_links)
+# : leur présence indique un import interrompu, à reprendre
 STAGING = ("stg_node", "stg_property", "stg_domain", "stg_domain_norm",
-           "stg_value", "stg_link")
+           "stg_value", "stg_link", "tmp_node_map_done", "tmp_node_ids",
+           "tmp_link_1", "tmp_link_2")
 
 # Types de nœuds (ceux de l'Enum8 de link / property) → colonne id de leur
 # table de valeurs (la table porte le nom du type). Seuls fqdn et ip ont un
@@ -143,6 +147,12 @@ MEM = ["--max_threads=1",
 # que 1/N des lignes → l'empreinte mémoire reste bornée même sur une VM Docker
 # à faible RAM. Surchargeable via l'environnement (IMPORT_LINK_SLICES).
 LINK_SLICES = int(os.environ.get("IMPORT_LINK_SLICES", "16"))
+# Tranches pour l'écriture des liens (jointures liens × correspondance) : les
+# deux côtés sont PARTITIONNÉS par hash de la valeur, chaque jointure ne lit
+# que sa partition — 1/N des liens contre 1/N de la correspondance, en
+# jointure par hachage (seul le côté correspondance est en RAM). Plus de
+# tranches = moins de RAM par requête, sans relecture supplémentaire.
+JOIN_SLICES = int(os.environ.get("IMPORT_JOIN_SLICES", "64"))
 
 FREE_WARN_GIB = 15
 
@@ -305,41 +315,12 @@ def report_domains() -> None:
     query("DROP TABLE IF EXISTS stg_domain_norm")
 
 
-def distribute_links(n: int = LINK_SLICES) -> None:
-    """Attribue les ids manquants puis résout stg_link → link, en N tranches
-    (empreinte mémoire bornée).
-
-    Tranche par cityHash64 : pour la tranche k on ne traite que les valeurs de
-    nœuds (resp. les liens) dont le hash % n == k. Aucune requête ne voit donc
-    plus de 1/n des données à la fois. Le hash ne sert qu'au découpage, jamais
-    d'id.
-
-    Valeurs traitées : les extrémités de stg_link (links.csv + liens de
-    domains.json) et les valeurs de domains.json (stg_value), pour tous les
-    types de NODE_TABLES. Une valeur déjà présente dans la table <type>
-    garde son id ; une valeur absente est créée avec un nouvel id
-    AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
-    ...), rank = 1000000 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
-    table : ses liens sont ignorés (et comptés).
-
-    Suppose un seul import à la fois : deux imports concurrents liraient le
-    même max(id) et attribueraient les mêmes ids.
-
-    Chaque lien résolu est inséré dans les deux sens (pas de projection
-    inverse sur link, cf. 02_optimized.sql).
-    """
-    if not exists("stg_link"):
-        return
-    if query("SELECT (SELECT count() FROM stg_link) + "
-             "(SELECT count() FROM stg_value)") == "0":
-        for tbl in ("stg_link", "stg_value"):
-            query(f"DROP TABLE IF EXISTS {tbl}")
-        return
-
-    log(f"Résolution des nœuds et des liens → link en {n} tranches...")
-    for t in ("stg_link", "stg_value"):
-        log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
-
+def build_node_map(n: int) -> None:
+    """3a / 3a bis : table de correspondance (type, valeur) → id des valeurs
+    citées par stg_link / stg_value, en n tranches, avec création des nœuds
+    inconnus (ids auto-incrémentés). Terminée, elle est renommée
+    tmp_node_map_done : une reprise ne la reconstruit pas (et ne recrée pas
+    de nœuds)."""
     # 3a — table de correspondance (type, valeur) → id, restreinte aux valeurs
     # citées par les liens ou par domains.json, construite tranche par tranche.
     query("DROP TABLE IF EXISTS tmp_link_values")
@@ -407,52 +388,169 @@ def distribute_links(n: int = LINK_SLICES) -> None:
             else f"  aucun nœud {typ} créé")
     log(f"  nouveaux ids attribués en {time.monotonic() - t:.0f} s")
 
-    # 3b — réécriture des liens avec les ids, tranche par tranche. Table link
-    # sans projection inverse (cf. 02_optimized.sql) : chaque lien résolu est
-    # inséré dans les DEUX sens (n1→n2 et n2→n1). Auto-liens (même type et
-    # même id des deux côtés : fqdn ↔ lui-même, ip ↔ elle-même) écartés.
-    t = time.monotonic()
-    for k in range(n):
-        base = (
-            "FROM (SELECT id_node_1, id_node_2, id_source, creation_date, update_date, "
-            "lower(type_1) AS t1, lower(type_2) AS t2 FROM stg_link "
-            f"WHERE cityHash64(id_node_1, id_node_2) % {n} = {k}) AS l "
-            "INNER JOIN tmp_node_map AS n1 ON n1.node_type = l.t1 AND n1.value = l.id_node_1 "
-            "INNER JOIN tmp_node_map AS n2 ON n2.node_type = l.t2 AND n2.value = l.id_node_2 "
-            "WHERE NOT (l.t1 = l.t2 AND n1.id = n2.id)"
-        )
-        query(
-            "INSERT INTO link "
-            "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
-            "SELECT l.t1, n1.id, l.t2, n2.id, toInt32OrZero(l.id_source), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
-            + base, mem=True)
-        query(
-            "INSERT INTO link "
-            "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
-            "SELECT l.t2, n2.id, l.t1, n1.id, toInt32OrZero(l.id_source), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
-            + base, mem=True)
-    log(f"  liens réécrits (2 sens) en {time.monotonic() - t:.0f} s")
+    query("RENAME TABLE tmp_node_map TO tmp_node_map_done")
 
-    staged = int(query("SELECT count() FROM stg_link"))
-    resolus = int(query(
-        "SELECT count() FROM stg_link AS l WHERE "
-        "(lower(l.type_1), l.id_node_1) IN (SELECT node_type, value FROM tmp_node_map) AND "
-        "(lower(l.type_2), l.id_node_2) IN (SELECT node_type, value FROM tmp_node_map)",
-        mem=True))
-    log(f"  liens résolus : {resolus:,} / {staged:,} "
-        f"(ignorés, nœud inconnu : {staged - resolus:,})")
-    autoliens = int(query(
-        "SELECT count() FROM stg_link "
-        "WHERE lower(type_1) = lower(type_2) AND id_node_1 = id_node_2"))
-    if autoliens:
-        log(f"  auto-liens ignorés (nœud lié à lui-même) : {autoliens:,}")
 
-    for tbl in ("tmp_node_map", "tmp_link_values", "stg_link", "stg_value"):
+def partitions(table: str) -> list:
+    """Tranches (partitions h) restant à traiter dans une table tmp_*."""
+    return [int(p) for p in query(
+        "SELECT DISTINCT partition FROM system.parts WHERE active "
+        f"AND database = currentDatabase() AND table = '{table}' "
+        "ORDER BY toUInt32(partition)").split()]
+
+
+def to_ts(col: str) -> str:
+    return (f"coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull({col})), "
+            "toUnixTimestamp(now()))")
+
+
+def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
+    """Attribue les ids manquants puis résout stg_link → link.
+
+    Valeurs traitées : les extrémités de stg_link (links.csv + liens de
+    domains.json) et les valeurs de domains.json (stg_value), pour tous les
+    types de NODE_TABLES. Une valeur déjà présente dans la table <type>
+    garde son id ; une valeur absente est créée avec un nouvel id
+    AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
+    ...), rank = 1000000 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
+    table : ses liens sont ignorés (et comptés).
+
+    Suppose un seul import à la fois : deux imports concurrents liraient le
+    même max(id) et attribueraient les mêmes ids.
+
+    Étapes, chacune bornée en mémoire et reprenable (make import-resume) :
+      1. correspondance valeur → id + nœuds créés (build_node_map, n
+         tranches), puis tmp_node_ids : la même, PARTITIONNÉE en m tranches
+         par cityHash64(valeur) ;
+      2. tmp_link_1 : stg_link typé et nettoyé, partitionné par le hash de
+         l'extrémité 1 ;
+      3. pour chaque tranche k : tmp_link_1[k] ⋈ tmp_node_ids[k] → id_1,
+         vers tmp_link_2, partitionnée par le hash de l'extrémité 2 ;
+      4. pour chaque tranche k : tmp_link_2[k] ⋈ tmp_node_ids[k] → id_2,
+         vers link, DANS LES DEUX SENS (pas de projection inverse sur link,
+         cf. 02_optimized.sql), sauf les auto-liens.
+    Chaque jointure ne voit que 1/m des liens et 1/m de la correspondance
+    (jointure par hachage : seul ce 1/m de correspondance est en RAM). Une
+    tranche terminée est supprimée (DROP PARTITION) : une reprise repart de
+    la première tranche restante. Une tranche interrompue puis rejouée
+    réinsère des lignes identiques, fusionnées par ReplacingMergeTree.
+    """
+    for tbl in ("tmp_node_ids_build", "tmp_link_1_build"):
         query(f"DROP TABLE IF EXISTS {tbl}")
+
+    if exists("tmp_node_ids"):
+        # reprise : le découpage doit rester celui des tables déjà construites
+        m = int(query("SELECT comment FROM system.tables WHERE database = "
+                      "currentDatabase() AND name = 'tmp_node_ids'")
+                .removeprefix("slices="))
+        log(f"Reprise de l'écriture des liens ({m} tranches)...")
+    else:
+        if not exists("stg_link"):
+            return
+        if query("SELECT (SELECT count() FROM stg_link) + "
+                 "(SELECT count() FROM stg_value)") == "0":
+            for tbl in ("stg_link", "stg_value"):
+                query(f"DROP TABLE IF EXISTS {tbl}")
+            return
+        log("Résolution des nœuds et des liens → link...")
+        for tbl in ("stg_link", "stg_value"):
+            log(f"  {tbl} : {int(query(f'SELECT count() FROM {tbl}')):,} lignes")
+        if exists("tmp_node_map_done"):
+            log("  correspondance valeur → id déjà construite (reprise)")
+        else:
+            build_node_map(n)
+        t = time.monotonic()
+        query("CREATE TABLE tmp_node_ids_build (h UInt16, "
+              "node_type LowCardinality(String), value String, id Int64) "
+              "ENGINE = MergeTree PARTITION BY h ORDER BY (node_type, value) "
+              f"COMMENT 'slices={m}'")
+        query(f"INSERT INTO tmp_node_ids_build SELECT cityHash64(value) % {m}, "
+              "node_type, value, id FROM tmp_node_map_done", mem=True)
+        query("RENAME TABLE tmp_node_ids_build TO tmp_node_ids")
+        for tbl in ("tmp_node_map_done", "tmp_link_values", "stg_value"):
+            query(f"DROP TABLE IF EXISTS {tbl}")
+        log(f"  correspondance découpée en {m} tranches en "
+            f"{duration(time.monotonic() - t)}")
+
+    if exists("stg_link"):
+        t = time.monotonic()
+        ok = (f"t1 IN ({TYPES_SQL}) AND t2 IN ({TYPES_SQL}) "
+              "AND v1 != '' AND v2 != ''")
+        raw = ("SELECT lower(type_1) AS t1, id_node_1 AS v1, lower(type_2) AS t2, "
+               "id_node_2 AS v2, id_source, creation_date, update_date "
+               "FROM stg_link")
+        total, bad, auto = map(int, query(
+            f"SELECT count(), countIf(NOT ({ok})), "
+            f"countIf(({ok}) AND t1 = t2 AND v1 = v2) FROM ({raw}) "
+            "FORMAT TSV", mem=True).split("\t"))
+        log(f"  liens à résoudre : {total - bad - auto:,} / {total:,}")
+        if bad:
+            log(f"  liens ignorés (type inconnu ou valeur vide) : {bad:,}")
+        if auto:
+            log(f"  auto-liens ignorés (nœud lié à lui-même) : {auto:,}")
+        query("CREATE TABLE tmp_link_1_build (h UInt16, "
+              "t1 LowCardinality(String), v1 String, "
+              "t2 LowCardinality(String), v2 String, id_source Int32, "
+              "detection_date UInt64, version UInt64) "
+              "ENGINE = MergeTree PARTITION BY h ORDER BY tuple()")
+        query(f"INSERT INTO tmp_link_1_build SELECT cityHash64(v1) % {m}, "
+              "t1, v1, t2, v2, toInt32OrZero(id_source), "
+              f"{to_ts('creation_date')}, {to_ts('update_date')} "
+              f"FROM ({raw}) WHERE {ok} AND NOT (t1 = t2 AND v1 = v2)",
+              mem=True)
+        query("RENAME TABLE tmp_link_1_build TO tmp_link_1")
+        query("DROP TABLE IF EXISTS stg_link")
+        log(f"  liens découpés en {m} tranches en {duration(time.monotonic() - t)}")
+
+    # jointure d'une tranche de liens avec la même tranche de correspondance
+    def join(src: str, k: int, t: str, v: str) -> str:
+        return (f"FROM (SELECT * FROM {src} WHERE h = {k}) AS l "
+                "INNER JOIN (SELECT node_type, value, id FROM tmp_node_ids "
+                f"WHERE h = {k}) AS m ON m.node_type = l.{t} AND m.value = l.{v} ")
+    hash_join = " SETTINGS join_algorithm = 'hash'"
+
+    if exists("tmp_link_1"):
+        query("CREATE TABLE IF NOT EXISTS tmp_link_2 (h UInt16, "
+              "t1 LowCardinality(String), id_1 Int64, "
+              "t2 LowCardinality(String), v2 String, id_source Int32, "
+              "detection_date UInt64, version UInt64) "
+              "ENGINE = MergeTree PARTITION BY h ORDER BY tuple()")
+        todo = partitions("tmp_link_1")
+        log(f"Liens, extrémité 1 → id : {len(todo)} tranches restantes...")
+        t = time.monotonic()
+        for i, k in enumerate(todo, 1):
+            query(f"INSERT INTO tmp_link_2 SELECT cityHash64(l.v2) % {m}, l.t1, "
+                  "m.id, l.t2, l.v2, l.id_source, l.detection_date, l.version "
+                  + join("tmp_link_1", k, "t1", "v1") + hash_join, mem=True)
+            query(f"ALTER TABLE tmp_link_1 DROP PARTITION {k}")
+            el = time.monotonic() - t
+            log(f"  tranche {i}/{len(todo)} · {duration(el)} · "
+                f"reste ~{duration(el / i * (len(todo) - i))}")
+        query("DROP TABLE tmp_link_1")
+
+    if exists("tmp_link_2"):
+        todo = partitions("tmp_link_2")
+        log(f"Liens, extrémité 2 → id, écriture dans link (2 sens) : "
+            f"{len(todo)} tranches restantes...")
+        t = time.monotonic()
+        for i, k in enumerate(todo, 1):
+            query("INSERT INTO link "
+                  "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
+                  "SELECT d.1, d.2, d.3, d.4, id_source, detection_date, version "
+                  "FROM (SELECT arrayJoin([(toString(l.t1), l.id_1, toString(l.t2), m.id), "
+                  "(toString(l.t2), m.id, toString(l.t1), l.id_1)]) AS d, "
+                  "l.id_source AS id_source, l.detection_date AS detection_date, "
+                  "l.version AS version "
+                  + join("tmp_link_2", k, "t2", "v2")
+                  + "WHERE NOT (l.t1 = l.t2 AND l.id_1 = m.id))" + hash_join,
+                  mem=True)
+            query(f"ALTER TABLE tmp_link_2 DROP PARTITION {k}")
+            el = time.monotonic() - t
+            log(f"  tranche {i}/{len(todo)} · {duration(el)} · "
+                f"reste ~{duration(el / i * (len(todo) - i))}")
+        query("DROP TABLE tmp_link_2")
+
+    query("DROP TABLE IF EXISTS tmp_node_ids")
 
 
 def reset_domain_links() -> None:

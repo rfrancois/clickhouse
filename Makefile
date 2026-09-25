@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init upgrade generate test import pdf down clean
+.PHONY: all up wait init upgrade generate test import import-resume pdf down clean
 
 all: up wait init generate
 
@@ -33,6 +33,10 @@ test: .venv
 import:
 	@test -n "$(FILE)" || { echo "Usage : make import FILE=<archive.zip|fichier|dossier>"; exit 1; }
 	$(PYTHON) scripts/import_data.py "$(FILE)"
+
+# Reprend la distribution d'un import interrompu (tables de staging conservées)
+import-resume:
+	$(PYTHON) scripts/import_data.py --resume
 
 pdf: .venv
 	$(PYTHON) scripts/make_pdf.py

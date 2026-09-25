@@ -146,8 +146,8 @@ SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 --    id_ip = 42 coexistent) : (type, id) identifie un nœud, pas l'id seul.
 --    Nouveau type de nœud → ajouter la valeur À LA FIN des deux Enum8
 --    (ALTER ... MODIFY COLUMN, métadonnées seules, aucune réécriture).
---    Chaque lien est inséré DEUX FOIS (A→B et B→A, cf. sql/05_import_distribute.sql
---    et distribute_links() dans scripts/import_data.py) : un simple filtre sur
+--    Chaque lien est inséré DEUX FOIS (A→B et B→A, cf. distribute_links() dans
+--    scripts/import_data.py) : un simple filtre sur
 --    (type_1, id_1) retrouve les voisins dans les deux sens, sans projection ni
 --    UNION à la lecture. Pas de projection inverse ici : dupliquer la ligne
 --    coûte à peu près la même place disque qu'une projection qui recopiait déjà

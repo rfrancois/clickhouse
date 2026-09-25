@@ -32,6 +32,7 @@ make clean        # tout supprime (volume, venv, résultats)
 
 ```bash
 make import FILE=archive.zip   # ou FILE=fichier.csv / fichier.json.gz / dossier
+make import-resume             # reprend un import interrompu pendant la distribution
 ```
 
 Fichiers reconnus (classification par nom) :
@@ -43,9 +44,16 @@ Fichiers reconnus (classification par nom) :
 | `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` (ip, et cn / dns qui sont des IP) |
 
-Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
-streaming `clickhouse-client`, pas de parsing Python) → distribution
-(`sql/05_import_distribute.sql`) vers les tables optimisées.
+Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql` ;
+CSV en streaming `clickhouse-client`, JSON par lots de `IMPORT_CHUNK_LINES`
+lignes via HTTP avec progression) → distribution vers les tables optimisées
+(`sql/05_import_normalize.sql`, `sql/06_import_domains.sql`,
+`scripts/import_data.py`).
+
+Chaque étape de distribution consomme puis supprime sa table de staging :
+si l'import échoue après le chargement (mémoire, `TOO_MANY_PARTS`...),
+`make import-resume` reprend à l'étape interrompue sans recharger les
+fichiers.
 
 `make import` est autonome : si les tables optimisées n'existent pas encore
 (`make init` jamais lancé), le schéma `sql/02_optimized.sql` est créé
@@ -74,7 +82,7 @@ Choix d'import :
   section "Table `link`" plus bas pour le détail) ;
 - `domains.json` **n'est pas fiable** : chaque valeur (`ip`, `cn`, entrées
   de `dns`) est normalisée puis validée avant usage
-  (`sql/05_import_distribute.sql`, étape 0) :
+  (`sql/05_import_normalize.sql`) :
   - normalisation : espaces, minuscules, point final retirés ; IPv6 en forme
     canonique ; doublons de `dns` supprimés ;
   - le type vient de la **forme** de la valeur : un `cn` / `dns` qui est
@@ -179,7 +187,7 @@ type de chaque extrémité :
   l'ancienne). Pour des voisins distincts, `DISTINCT` / `GROUP BY` à la
   lecture ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
-  les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
+  les deux sens (A→B et B→A) par l'import (`sql/06_import_domains.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
   Un simple filtre `type_1 = ... AND id_1 = ...` retrouve donc les voisins
   des deux côtés, sans `UNION`. Coût disque équivalent à une projection

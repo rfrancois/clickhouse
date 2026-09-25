@@ -4,6 +4,8 @@
 plus alimentées).
 
 Usage : make import FILE=<archive.zip | fichier | dossier>
+        make import-resume   (reprend la distribution après un échec, sans
+                              recharger les fichiers)
 
 Fichiers reconnus (classification par nom) :
   - *node*.csv   : id;value;type;creation_date;rank        (';' + quotes)
@@ -28,16 +30,23 @@ milliard de lignes) :
        plugin, ... cf. NODE_TABLES), avec ses propres ids (distribute_nodes)
      - properties.csv → property, id_node déjà numérique, sans résolution
        (distribute_properties)
-     - domains.json → valeurs (stg_value) et liens cn ↔ dns / cn ↔ ip
-       (stg_link), sans id (sql/05_import_distribute.sql), après
-       normalisation et validation de chaque valeur (données non fiables :
-       un cn ou dns qui est une IP est typé ip, jamais versé dans fqdn ;
-       wildcards, IP non routables, noms invalides rejetés et comptés)
+     - domains.json → normalisation et validation de chaque valeur
+       (sql/05_import_normalize.sql ; données non fiables : un cn ou dns qui
+       est une IP est typé ip, jamais versé dans fqdn ; wildcards, IP non
+       routables, noms invalides rejetés et comptés), puis valeurs
+       (stg_value) et liens cn ↔ dns / cn ↔ ip (stg_link), sans id
+       (sql/06_import_domains.sql)
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
        Docker modeste) : résolution valeur → id ; toute valeur absente de
        sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
        type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
        DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même)
+
+Reprise : chaque étape de distribution ne s'exécute que si sa table de
+staging d'entrée existe encore, et la supprime une fois finie. Après un
+échec (TOO_MANY_PARTS, mémoire...), `make import-resume` reprend donc à
+l'étape interrompue, sans refaire le chargement (des heures sur un gros
+domains.json).
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 (A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
@@ -58,7 +67,10 @@ from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parent.parent
 SQL_STAGING = ROOT / "sql" / "04_import_staging.sql"
-SQL_DISTRIBUTE = ROOT / "sql" / "05_import_distribute.sql"
+SQL_NORMALIZE = ROOT / "sql" / "05_import_normalize.sql"
+SQL_DOMAINS = ROOT / "sql" / "06_import_domains.sql"
+STAGING = ("stg_node", "stg_property", "stg_domain", "stg_domain_norm",
+           "stg_value", "stg_link")
 
 # Types de nœuds (ceux de l'Enum8 de link / property) → colonne id de leur
 # table de valeurs (la table porte le nom du type). Seuls fqdn et ip ont un
@@ -115,12 +127,17 @@ DROP_OK = ["--max_table_size_to_drop=0", "--max_partition_size_to_drop=0"]
 #   use_skip_indexes=0 : fqdn est triée sur (id_fqdn, value), donc
 #   l'index ngram sur `value` n'élague rien pour une égalité — inutile de
 #   charger ~2 Gio de filtres de Bloom pour un scan qui sera complet.
+#   min_insert_block_size_* : un INSERT ... SELECT crée une part par bloc
+#   (~1 M de lignes par défaut) ; sur des milliards de lignes, des blocs de
+#   1 Gio évitent TOO_MANY_PARTS (cf. 05_import_normalize.sql).
 MEM = ["--max_threads=1",
        "--max_memory_usage=11000000000",
        "--max_bytes_before_external_group_by=536870912",
        "--max_bytes_before_external_sort=536870912",
        "--use_skip_indexes=0",
-       "--join_algorithm=full_sorting_merge"]
+       "--join_algorithm=full_sorting_merge",
+       "--min_insert_block_size_rows=100000000",
+       "--min_insert_block_size_bytes=1073741824"]
 
 # Nombre de tranches pour la distribution des liens : chaque requête ne traite
 # que 1/N des lignes → l'empreinte mémoire reste bornée même sur une VM Docker
@@ -169,9 +186,17 @@ def progress(done: int, total: int, lines: int, elapsed: float,
 
 
 def query(sql: str, mem: bool = False) -> str:
-    r = subprocess.run(CLIENT + (MEM if mem else []) + ["-q", sql],
-                       capture_output=True, text=True, check=True)
+    r = subprocess.run(CLIENT + DROP_OK + (MEM if mem else []) + ["-q", sql],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        # message du serveur visible (sinon perdu dans capture_output)
+        log(r.stderr.strip())
+        raise subprocess.CalledProcessError(r.returncode, sql[:200])
     return r.stdout.strip()
+
+
+def exists(table: str) -> bool:
+    return query(f"EXISTS TABLE {table}") == "1"
 
 
 def run_sql_file(path: Path) -> None:
@@ -184,6 +209,8 @@ def distribute_nodes() -> None:
 
     Un type absent de NODE_TABLES n'a pas de table : ses lignes sont ignorées
     (et comptées)."""
+    if not exists("stg_node"):
+        return
     counts = query("SELECT lower(node_type), count() FROM stg_node "
                    "WHERE value != '' GROUP BY 1 ORDER BY 1 FORMAT TSV")
     if not counts:
@@ -221,6 +248,8 @@ def distribute_properties() -> None:
     version (date de mise à jour) → timestamp Unix, now() si illisible ;
     detection_date illisible (dont la date zéro MySQL 0000-00-00) → date de
     version."""
+    if not exists("stg_property"):
+        return
     counts = query("SELECT lower(node_type), toInt64OrZero(id_node) != 0, count() "
                    "FROM stg_property GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV")
     if not counts:
@@ -257,9 +286,9 @@ def distribute_properties() -> None:
 
 def report_domains() -> None:
     """Affiche les valeurs de domains.json rejetées par la validation de
-    sql/05_import_distribute.sql (étape 0), par champ et par raison, puis
-    supprime stg_domain_norm."""
-    if query("EXISTS TABLE stg_domain_norm") != "1":
+    sql/05_import_normalize.sql, par champ et par raison, puis supprime
+    stg_domain_norm."""
+    if not exists("stg_domain_norm"):
         return
     rows = query(
         "SELECT field, reason, count() FROM ("
@@ -299,6 +328,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     Chaque lien résolu est inséré dans les deux sens (pas de projection
     inverse sur link, cf. 02_optimized.sql).
     """
+    if not exists("stg_link"):
+        return
     if query("SELECT (SELECT count() FROM stg_link) + "
              "(SELECT count() FROM stg_value)") == "0":
         for tbl in ("stg_link", "stg_value"):
@@ -422,6 +453,70 @@ def distribute_links(n: int = LINK_SLICES) -> None:
 
     for tbl in ("tmp_node_map", "tmp_link_values", "stg_link", "stg_value"):
         query(f"DROP TABLE IF EXISTS {tbl}")
+
+
+def reset_domain_links() -> None:
+    """Reprise : 06_import_domains.sql a pu s'arrêter en cours de route (un
+    INSERT ... SELECT interrompu laisse ses parts déjà écrites). On efface ce
+    qu'il produit — stg_value, et les liens de stg_link issus de domains.json
+    (id_source '0', dates vides) — avant de le rejouer."""
+    log("  reprise : effacement de stg_value et des liens de domains.json...")
+    query("TRUNCATE TABLE stg_value")
+    cond = "id_source = '0' AND creation_date = '' AND update_date = ''"
+    if query(f"SELECT count() FROM stg_link WHERE NOT ({cond})") == "0":
+        query("TRUNCATE TABLE stg_link")
+    else:  # liens CSV présents : on ne retire que ceux de domains.json
+        query(f"DELETE FROM stg_link WHERE {cond}", mem=True)
+
+
+def distribute(resume: bool = False) -> None:
+    """staging → tables optimisées. Chaque étape ne s'exécute que si sa table
+    d'entrée existe encore (elle la supprime une fois finie) : après un
+    échec, resume=True reprend à l'étape interrompue."""
+    log("Distribution vers les tables optimisées...")
+    t = time.monotonic()
+    # Les tables de staging chargées ne sont plus que lues : on suspend leurs
+    # merges (stg_domain surtout : une part par lot), qui concurrencent la
+    # distribution en mémoire. PAS de SYSTEM STOP MERGES global : les tables
+    # écrites ici (stg_link, link, fqdn...) reçoivent des milliards de lignes
+    # et finissent en TOO_MANY_PARTS si leurs parts ne sont pas fusionnées.
+    for tbl in ("stg_node", "stg_property", "stg_domain"):
+        if exists(tbl):
+            query(f"SYSTEM STOP MERGES {tbl}")
+    try:
+        query("SYSTEM DROP MARK CACHE")
+        query("SYSTEM DROP UNCOMPRESSED CACHE")
+        distribute_nodes()  # node.csv → <type>
+        distribute_properties()  # properties.csv → property
+        if exists("stg_domain"):  # domains.json → stg_domain_norm
+            if resume:  # normalisation interrompue : on la refait entière
+                query("TRUNCATE TABLE IF EXISTS stg_domain_norm")
+            log("Normalisation de domains.json...")
+            run_sql_file(SQL_NORMALIZE)
+        if exists("stg_domain_norm"):  # → stg_value / stg_link
+            if resume:
+                reset_domain_links()
+            log("Extraction des valeurs et liens de domains.json...")
+            run_sql_file(SQL_DOMAINS)
+        report_domains()  # valeurs de domains.json rejetées
+        distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
+    finally:
+        query("SYSTEM START MERGES")
+    log(f"  fait en {time.monotonic() - t:.0f} s")
+
+
+def print_counts(t0: float) -> None:
+    log("\nCompteurs après import :")
+    counts = query(
+        "SELECT * FROM ("
+        + " UNION ALL ".join(f"SELECT '{t}' AS tbl, count() AS n FROM {t}"
+                             for t in NODE_TABLES)
+        + " UNION ALL SELECT 'link', count() FROM link"
+        " UNION ALL SELECT 'property', count() FROM property"
+        ") ORDER BY tbl FORMAT PrettyCompactMonoBlock")
+    log(counts)
+    log(f"\nImport terminé en {time.monotonic() - t0:.0f} s "
+        "(dédup ReplacingMergeTree asynchrone en arrière-plan).")
 
 
 def iter_blocks(path: Path):
@@ -593,9 +688,11 @@ def collect_files(src: Path):
 
 def main() -> None:
     if len(sys.argv) != 2 or not sys.argv[1]:
-        sys.exit("Usage : make import FILE=<archive.zip|fichier|dossier>")
-    src = Path(sys.argv[1]).expanduser().resolve()
-    if not src.exists():
+        sys.exit("Usage : make import FILE=<archive.zip|fichier|dossier>\n"
+                 "        make import-resume")
+    resume = sys.argv[1] == "--resume"
+    src = None if resume else Path(sys.argv[1]).expanduser().resolve()
+    if src is not None and not src.exists():
         sys.exit(f"Fichier introuvable : {src}")
 
     free = shutil.disk_usage(ROOT).free / 2**30
@@ -620,6 +717,19 @@ def main() -> None:
         log("Tables optimisées absentes → création du schéma "
             "(sql/02_optimized.sql)...")
         run_sql_file(ROOT / "sql" / "02_optimized.sql")
+
+    if resume:
+        present = [t for t in STAGING if exists(t)]
+        if not present:
+            sys.exit("Rien à reprendre : aucune table de staging "
+                     "(import terminé, ou jamais lancé).")
+        log("Reprise, tables de staging présentes :")
+        for t in present:
+            log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
+        t0 = time.monotonic()
+        distribute(resume=True)
+        print_counts(t0)
+        return
 
     files, tmp = collect_files(src)
     try:
@@ -673,35 +783,14 @@ def main() -> None:
             n = query(f"SELECT count() FROM {table}")
             log(f"  {int(n):,} lignes en staging en {time.monotonic() - t:.0f} s")
 
-        log("Distribution vers les tables optimisées...")
-        t = time.monotonic()
-        # Les merges en arrière-plan (déclenchés par le chargement de staging)
-        # sont le principal concurrent mémoire pendant la distribution : on les
-        # met en pause, on les reprend quoi qu'il arrive.
-        query("SYSTEM STOP MERGES")
         try:
-            query("SYSTEM DROP MARK CACHE")
-            query("SYSTEM DROP UNCOMPRESSED CACHE")
-            distribute_nodes()  # node.csv → <type>
-            distribute_properties()  # properties.csv → property
-            run_sql_file(SQL_DISTRIBUTE)  # domains.json → stg_value / stg_link
-            report_domains()  # valeurs de domains.json rejetées
-            distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
-        finally:
-            query("SYSTEM START MERGES")
-        log(f"  fait en {time.monotonic() - t:.0f} s")
-
-        log("\nCompteurs après import :")
-        counts = query(
-            "SELECT * FROM ("
-            + " UNION ALL ".join(f"SELECT '{t}' AS tbl, count() AS n FROM {t}"
-                                 for t in NODE_TABLES)
-            + " UNION ALL SELECT 'link', count() FROM link"
-            " UNION ALL SELECT 'property', count() FROM property"
-            ") ORDER BY tbl FORMAT PrettyCompactMonoBlock")
-        log(counts)
-        log(f"\nImport terminé en {time.monotonic() - t0:.0f} s "
-            "(dédup ReplacingMergeTree asynchrone en arrière-plan).")
+            distribute()
+        except subprocess.CalledProcessError:
+            log("\nDistribution interrompue. Les données chargées sont "
+                "conservées en staging :\n  → après correction, reprendre "
+                "sans recharger : make import-resume")
+            raise
+        print_counts(t0)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)

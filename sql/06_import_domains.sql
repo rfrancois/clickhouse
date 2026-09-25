@@ -1,5 +1,5 @@
 -- ============================================================
--- DISTRIBUTION staging → tables optimisées — partie DOMAINS
+-- IMPORT domains.json — étapes 1 / 1b : valeurs et liens
 -- ============================================================
 -- node.csv (qui fournit ses propres ids) est distribué par
 -- scripts/import_data.py (distribute_nodes), une table par type de nœud.
@@ -13,9 +13,9 @@
 -- les grosses tables font tuer le serveur par l'OOM killer (exit 137) sur les
 -- VM Docker à faible RAM.
 --
--- ATTENTION : domains.json n'est PAS fiable (cn = IP, cn identique à ip, noms
--- en majuscules, wildcards, texte libre...). Chaque valeur est donc
--- normalisée et validée (étape 0) avant d'être utilisée.
+-- Entrée : stg_domain_norm (05_import_normalize.sql). Rejouable : en cas
+-- d'échec, `make import-resume` vide stg_value et les liens issus de
+-- domains.json puis relance ce fichier.
 
 -- ------------------------------------------------------------
 -- Garde-fous mémoire : chaque requête plafonne sa RAM et déborde sur disque
@@ -26,57 +26,11 @@ SET max_memory_usage = 11000000000;                  -- 11 Gio / requête (< cap
 SET max_bytes_before_external_group_by = 536870912;  -- 512 Mio → spill disque
 SET max_bytes_before_external_sort = 536870912;      -- 512 Mio → spill disque
 SET use_skip_indexes = 0;                            -- l'index ngram n'aide pas ici, il coûte de la RAM
-
--- ---------- 0) nettoyage / validation → stg_domain_norm ----------
--- ip, cn et chaque entrée de dns passent par la même règle (lambda unique
--- appliquée à [ip, cn, dns...]) :
---   normalisation : espaces retirés, minuscules, point final retiré
---                   (Netflix.COM. → netflix.com) ;
---   IPv4 / IPv6   → ('ip', forme canonique : 2001:DB8:0::1 → 2001:db8::1),
---                   le type vient de la FORME de la valeur, pas du champ
---                   (un cn qui est une IP n'est jamais versé dans fqdn) ;
---                   IP jamais significative (0.0.0.0/8, 127/8, 169.254/16,
---                   224/3 = multicast + réservé + broadcast, ::, ::1,
---                   fe80::/10, ff00::/8, ::ffff:0|127.x) → 'x_nonroutable' ;
---   *.domaine     → 'x_wildcard' (pas un nœud réel) ;
---   nom d'hôte valide → ('fqdn', valeur) : ≤ 253 caractères, au moins deux
---                   labels de 1 à 63 caractères [a-z0-9_-] ou non-ASCII
---                   (IDN), dernier label pas entièrement numérique (écarte
---                   999.1.1.1) ; donc rejet de localhost, "a b.com",
---                   admin@x.com, x.com/path, CN=foo.com... → 'x_invalid' ;
---   vide / null   → ('', '').
--- Le champ ip doit être une IP : un nom d'hôte y est rejeté ('x_invalid').
--- Doublons dans dns (après normalisation) supprimés.
-
-INSERT INTO stg_domain_norm (ip, cn, dns)
-SELECT if(n[1].1 = 'fqdn', ('x_invalid', n[1].2), n[1]),
-       n[2],
-       arrayDistinct(arrayFilter(x -> x.1 != '', arraySlice(n, 3)))
-FROM (
-    SELECT arrayMap(v -> multiIf(
-               v = '', ('', ''),
-               isIPv4String(v),
-                   if(arrayExists(r -> isIPAddressInRange(v, r),
-                                  ['0.0.0.0/8', '127.0.0.0/8', '169.254.0.0/16',
-                                   '224.0.0.0/3']),
-                      ('x_nonroutable', v), ('ip', toString(toIPv4(v)))),
-               isIPv6String(v),
-                   if(arrayExists(r -> isIPAddressInRange(v, r),
-                                  ['::/127', 'fe80::/10', 'ff00::/8',
-                                   '::ffff:0.0.0.0/104', '::ffff:127.0.0.0/104']),
-                      ('x_nonroutable', v), ('ip', toString(toIPv6(v)))),
-               startsWith(v, '*.'), ('x_wildcard', v),
-               length(v) <= 253
-                   AND match(v, '^(?:[a-z0-9_]|[^\\x00-\\x7f])(?:[a-z0-9_-]|[^\\x00-\\x7f]){0,62}(?:\\.(?:[a-z0-9_]|[^\\x00-\\x7f])(?:[a-z0-9_-]|[^\\x00-\\x7f]){0,62})+$')
-                   AND NOT match(v, '\\.[0-9]+$'),
-                   ('fqdn', v),
-               ('x_invalid', v)),
-             arrayMap(x -> trim(TRAILING '.' FROM lowerUTF8(trimBoth(ifNull(x, '')))),
-                      arrayConcat([ip, cn], dns))) AS n
-    FROM stg_domain
-);
-
-DROP TABLE stg_domain;
+-- Gros blocs d'insertion (1 Gio) : un INSERT ... SELECT de milliards de
+-- lignes crée une part par bloc (~1 M de lignes par défaut) ; avec des
+-- blocs 16x plus gros, les merges suivent au lieu de TOO_MANY_PARTS.
+SET min_insert_block_size_rows = 100000000;
+SET min_insert_block_size_bytes = 1073741824;
 
 -- ---------- 1) valeurs retenues → stg_value (sans id) ----------
 -- Pas d'insert direct dans fqdn / ip : l'id est attribué plus

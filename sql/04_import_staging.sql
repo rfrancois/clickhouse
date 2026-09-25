@@ -3,7 +3,8 @@
 -- ============================================================
 -- Tout est stocké brut (String / Nullable) tel que lu dans les fichiers.
 -- La typisation et la distribution vers les tables optimisées
--- sont faites par 05_import_distribute.sql.
+-- sont faites par 05_import_normalize.sql / 06_import_domains.sql
+-- et scripts/import_data.py.
 
 DROP TABLE IF EXISTS stg_node;
 DROP TABLE IF EXISTS stg_link;
@@ -68,7 +69,7 @@ CREATE TABLE stg_domain
 ENGINE = MergeTree
 ORDER BY tuple();
 
--- domains.json après nettoyage / validation (05_import_distribute.sql) :
+-- domains.json après nettoyage / validation (05_import_normalize.sql) :
 -- chaque valeur devient (type, valeur normalisée). type 'fqdn' / 'ip' =
 -- valeur retenue ; 'x_…' = valeur REJETÉE (raison), comptée puis écartée par
 -- scripts/import_data.py (report_domains) ; '' = valeur absente.
@@ -82,7 +83,7 @@ ENGINE = MergeTree
 ORDER BY tuple();
 
 -- valeurs fqdn/ip sans id (issues de domains.json) : alimentée par
--- 05_import_distribute.sql, un id leur est attribué (auto-incrément à partir
+-- 06_import_domains.sql, un id leur est attribué (auto-incrément à partir
 -- du max existant) par distribute_links() dans scripts/import_data.py
 CREATE TABLE stg_value
 (

@@ -388,6 +388,7 @@ def build_node_map(n: int) -> None:
             else f"  aucun nœud {typ} créé")
     log(f"  nouveaux ids attribués en {time.monotonic() - t:.0f} s")
 
+    check(count("tmp_node_map") > 0, "correspondance valeur → id vide")
     query("RENAME TABLE tmp_node_map TO tmp_node_map_done")
 
 
@@ -397,6 +398,20 @@ def partitions(table: str) -> list:
         "SELECT DISTINCT partition FROM system.parts WHERE active "
         f"AND database = currentDatabase() AND table = '{table}' "
         "ORDER BY toUInt32(partition)").split()]
+
+
+def count(table: str, where: str = "") -> int:
+    return int(query(f"SELECT count() FROM {table}"
+                     + (f" WHERE {where}" if where else "")))
+
+
+def check(ok: bool, msg: str) -> None:
+    """Garde-fou : arrête l'import AVANT toute suppression de données dont
+    on n'a pas vérifié la copie (les tables restent en place pour analyse,
+    make import-resume reprend après correction)."""
+    if not ok:
+        raise RuntimeError(f"Garde-fou : {msg} — import arrêté, rien n'a été "
+                           "supprimé.")
 
 
 def to_ts(col: str) -> str:
@@ -444,6 +459,7 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
                       "currentDatabase() AND name = 'tmp_node_ids'")
                 .removeprefix("slices="))
         log(f"Reprise de l'écriture des liens ({m} tranches)...")
+        check(count("tmp_node_ids") > 0, "tmp_node_ids est vide")
     else:
         if not exists("stg_link"):
             return
@@ -466,10 +482,13 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
               f"COMMENT 'slices={m}'")
         query(f"INSERT INTO tmp_node_ids_build SELECT cityHash64(value) % {m}, "
               "node_type, value, id FROM tmp_node_map_done", mem=True)
+        src, dst = count("tmp_node_map_done"), count("tmp_node_ids_build")
+        check(src > 0 and dst == src,
+              f"copie de la correspondance incomplète ({dst:,} / {src:,} lignes)")
         query("RENAME TABLE tmp_node_ids_build TO tmp_node_ids")
         for tbl in ("tmp_node_map_done", "tmp_link_values", "stg_value"):
             query(f"DROP TABLE IF EXISTS {tbl}")
-        log(f"  correspondance découpée en {m} tranches en "
+        log(f"  correspondance : {dst:,} valeurs, découpée en {m} tranches en "
             f"{duration(time.monotonic() - t)}")
 
     if exists("stg_link"):
@@ -498,6 +517,9 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
               f"{to_ts('creation_date')}, {to_ts('update_date')} "
               f"FROM ({raw}) WHERE {ok} AND NOT (t1 = t2 AND v1 = v2)",
               mem=True)
+        dst = count("tmp_link_1_build")
+        check(dst == total - bad - auto,
+              f"copie des liens incomplète ({dst:,} / {total - bad - auto:,})")
         query("RENAME TABLE tmp_link_1_build TO tmp_link_1")
         query("DROP TABLE IF EXISTS stg_link")
         log(f"  liens découpés en {m} tranches en {duration(time.monotonic() - t)}")
@@ -519,9 +541,15 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
         log(f"Liens, extrémité 1 → id : {len(todo)} tranches restantes...")
         t = time.monotonic()
         for i, k in enumerate(todo, 1):
+            src, before = count("tmp_link_1", f"h = {k}"), count("tmp_link_2")
             query(f"INSERT INTO tmp_link_2 SELECT cityHash64(l.v2) % {m}, l.t1, "
                   "m.id, l.t2, l.v2, l.id_source, l.detection_date, l.version "
                   + join("tmp_link_1", k, "t1", "v1") + hash_join, mem=True)
+            # la correspondance a été construite à partir des extrémités des
+            # liens (une valeur = un id) : chaque lien doit être résolu
+            got = count("tmp_link_2") - before
+            check(got == src, f"tranche {k} : {got:,} liens résolus sur {src:,} "
+                  "(extrémité 1)")
             query(f"ALTER TABLE tmp_link_1 DROP PARTITION {k}")
             el = time.monotonic() - t
             log(f"  tranche {i}/{len(todo)} · {duration(el)} · "
@@ -534,6 +562,7 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
             f"{len(todo)} tranches restantes...")
         t = time.monotonic()
         for i, k in enumerate(todo, 1):
+            src, before = count("tmp_link_2", f"h = {k}"), count("link")
             query("INSERT INTO link "
                   "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
                   "SELECT d.1, d.2, d.3, d.4, id_source, detection_date, version "
@@ -544,6 +573,10 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
                   + join("tmp_link_2", k, "t2", "v2")
                   + "WHERE NOT (l.t1 = l.t2 AND l.id_1 = m.id))" + hash_join,
                   mem=True)
+            # link est une ReplacingMergeTree (ses merges peuvent retirer des
+            # doublons en parallèle) : contrôle grossier, rien d'écrit = arrêt
+            check(src == 0 or count("link") > before,
+                  f"tranche {k} : aucun lien écrit dans link sur {src:,}")
             query(f"ALTER TABLE tmp_link_2 DROP PARTITION {k}")
             el = time.monotonic() - t
             log(f"  tranche {i}/{len(todo)} · {duration(el)} · "
@@ -883,7 +916,7 @@ def main() -> None:
 
         try:
             distribute()
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, RuntimeError):
             log("\nDistribution interrompue. Les données chargées sont "
                 "conservées en staging :\n  → après correction, reprendre "
                 "sans recharger : make import-resume")

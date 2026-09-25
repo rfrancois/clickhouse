@@ -13,6 +13,17 @@ DROP TABLE IF EXISTS stg_domain_norm;
 DROP TABLE IF EXISTS stg_value;
 DROP TABLE IF EXISTS stg_property;
 
+-- tables intermédiaires d'un import interrompu (distribute_links dans
+-- scripts/import_data.py) : un nouvel import repart de zéro
+DROP TABLE IF EXISTS tmp_link_values;
+DROP TABLE IF EXISTS tmp_node_map;
+DROP TABLE IF EXISTS tmp_node_map_done;
+DROP TABLE IF EXISTS tmp_node_ids_build;
+DROP TABLE IF EXISTS tmp_node_ids;
+DROP TABLE IF EXISTS tmp_link_1_build;
+DROP TABLE IF EXISTS tmp_link_1;
+DROP TABLE IF EXISTS tmp_link_2;
+
 -- node.csv : id;value;type;creation_date;rank  (séparateur ';', champs quotés)
 CREATE TABLE stg_node
 (

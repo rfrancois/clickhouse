@@ -1,14 +1,15 @@
 -- ============================================================
 -- STAGING D'IMPORT — fichiers réels (make import FILE=...)
 -- ============================================================
+-- Fichiers CSV seulement (domains.json est importé lot par lot, sans
+-- staging : import_domains dans scripts/import_data.py).
 -- Tout est stocké brut (String / Nullable) tel que lu dans les fichiers.
--- La typisation et la distribution vers les tables optimisées
--- sont faites par 05_import_normalize.sql / 06_import_domains.sql
--- et scripts/import_data.py.
+-- La typisation et la distribution vers les tables optimisées sont faites
+-- par scripts/import_data.py.
 
 DROP TABLE IF EXISTS stg_node;
 DROP TABLE IF EXISTS stg_link;
-DROP TABLE IF EXISTS stg_domain;
+DROP TABLE IF EXISTS stg_domain;       -- anciennes versions de l'import
 DROP TABLE IF EXISTS stg_domain_norm;
 DROP TABLE IF EXISTS stg_value;
 DROP TABLE IF EXISTS stg_property;
@@ -65,41 +66,6 @@ CREATE TABLE stg_property
     payload        String,
     version        String,
     detection_date String
-)
-ENGINE = MergeTree
-ORDER BY tuple();
-
--- domains.json[.gz] : une ligne JSON par enregistrement
--- {"cn": "...", "dns": ["...", ...] | null, "ip": "..." | null}
-CREATE TABLE stg_domain
-(
-    cn  Nullable(String),
-    dns Array(Nullable(String)),
-    ip  Nullable(String)
-)
-ENGINE = MergeTree
-ORDER BY tuple();
-
--- domains.json après nettoyage / validation (05_import_normalize.sql) :
--- chaque valeur devient (type, valeur normalisée). type 'fqdn' / 'ip' =
--- valeur retenue ; 'x_…' = valeur REJETÉE (raison), comptée puis écartée par
--- scripts/import_data.py (report_domains) ; '' = valeur absente.
-CREATE TABLE stg_domain_norm
-(
-    ip  Tuple(String, String),
-    cn  Tuple(String, String),
-    dns Array(Tuple(String, String))
-)
-ENGINE = MergeTree
-ORDER BY tuple();
-
--- valeurs fqdn/ip sans id (issues de domains.json) : alimentée par
--- 06_import_domains.sql, un id leur est attribué (auto-incrément à partir
--- du max existant) par distribute_links() dans scripts/import_data.py
-CREATE TABLE stg_value
-(
-    node_type String,
-    value     String
 )
 ENGINE = MergeTree
 ORDER BY tuple();

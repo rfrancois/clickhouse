@@ -32,7 +32,7 @@ make clean        # tout supprime (volume, venv, résultats)
 
 ```bash
 make import FILE=archive.zip   # ou FILE=fichier.csv / fichier.json.gz / dossier
-make import-resume             # reprend un import interrompu pendant la distribution
+make import-resume             # CSV : reprend une distribution interrompue
 ```
 
 Fichiers reconnus (classification par nom) :
@@ -44,14 +44,33 @@ Fichiers reconnus (classification par nom) :
 | `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` (ip, et cn / dns qui sont des IP) |
 
-Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql` ;
-CSV en streaming `clickhouse-client`, JSON par lots de `IMPORT_CHUNK_LINES`
-lignes via HTTP avec progression) → distribution vers les tables optimisées
-(`sql/05_import_normalize.sql`, `sql/06_import_domains.sql`,
-`scripts/import_data.py`).
+**`domains.json` : import petit à petit.** Le fichier est lu par lots de
+100 000 lignes (`IMPORT_BATCH_LINES`) ; chaque lot est entièrement traité
+avant de lire le suivant : nettoyage (`sql/05_import_normalize.sql`),
+nœuds créés dans `fqdn` / `ip`, liens écrits dans `link`. Les tables
+grossissent dès le premier lot, avec une progression (lignes, nœuds et
+liens créés, temps restant) :
 
-Chaque étape de distribution consomme puis supprime sa table de staging :
-si l'import échoue après le chargement (mémoire, `TOO_MANY_PARTS`...),
+```
+  [  1.2 %] 27,100,000 lignes · fqdn +1,204,512 · ip +31,907 · liens +48,520,114 · ...
+```
+
+- l'id d'une valeur déjà connue est retrouvé dans `fqdn_ids` / `ip_ids`,
+  tables valeur → id (moteur `EmbeddedRocksDB`, recherche directe par clé)
+  construites une seule fois depuis `fqdn` / `ip` au premier import, puis
+  tenues à jour par tous les imports ;
+- **reprise** : chaque lot validé est enregistré dans `import_state`.
+  Après une coupure (Ctrl+C, panne, OOM...), relancer **la même commande**
+  reprend après le dernier lot validé ; un lot interrompu est rejoué à
+  l'identique. Un fichier déjà importé en entier est ignoré (message avec la
+  commande pour le réimporter) ;
+- une ligne JSON illisible est ignorée et comptée (la ligne suivante peut
+  être perdue avec elle).
+
+**CSV** : staging brut (`sql/04_import_staging.sql`, streaming
+`clickhouse-client`) puis distribution vers les tables optimisées
+(`scripts/import_data.py`). Chaque étape de distribution consomme puis
+supprime sa table de staging : si l'import échoue après le chargement,
 `make import-resume` reprend à l'étape interrompue sans recharger les
 fichiers.
 
@@ -105,7 +124,8 @@ Choix d'import :
   → date de `version` ;
 - la déduplication est assurée par `ReplacingMergeTree(version)`
   (asynchrone) ;
-- lignes malformées tolérées (0,1 % max, 1000 erreurs).
+- lignes malformées tolérées (0,1 % max, 1000 erreurs ; par lot pour
+  `domains.json`).
 
 Ré-import idempotent : on peut relancer `make import` sur un fichier déjà
 importé, les doublons seront fusionnés dans les tables optimisées.
@@ -187,7 +207,7 @@ type de chaque extrémité :
   l'ancienne). Pour des voisins distincts, `DISTINCT` / `GROUP BY` à la
   lecture ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
-  les deux sens (A→B et B→A) par l'import (`sql/06_import_domains.sql`,
+  les deux sens (A→B et B→A) par l'import (`import_domains()` et
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
   Un simple filtre `type_1 = ... AND id_1 = ...` retrouve donc les voisins
   des deux côtés, sans `UNION`. Coût disque équivalent à une projection

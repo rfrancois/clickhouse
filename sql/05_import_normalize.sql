@@ -1,29 +1,14 @@
 -- ============================================================
--- IMPORT domains.json — étape 0 : nettoyage / validation
+-- IMPORT domains.json — nettoyage / validation d'un lot
 -- ============================================================
--- stg_domain (brut) → stg_domain_norm, puis DROP stg_domain. Les valeurs
--- retenues et les liens sont extraits ensuite par 06_import_domains.sql.
+-- stg_domain (un lot brut) → stg_domain_norm. Exécutée pour chaque lot par
+-- import_domains() dans scripts/import_data.py : UNE SEULE requête, sans
+-- `;` final ni SET (envoyée telle quelle par HTTP).
 --
 -- ATTENTION : domains.json n'est PAS fiable (cn = IP, cn identique à ip, noms
 -- en majuscules, wildcards, texte libre...). Chaque valeur est donc
 -- normalisée et validée avant d'être utilisée.
-
--- ------------------------------------------------------------
--- Garde-fous mémoire : chaque requête plafonne sa RAM et déborde sur disque
--- très tôt plutôt que de pousser le serveur jusqu'à l'OOM.
--- ------------------------------------------------------------
-SET max_threads = 1;
-SET max_memory_usage = 11000000000;                  -- 11 Gio / requête (< cap serveur)
-SET max_bytes_before_external_group_by = 536870912;  -- 512 Mio → spill disque
-SET max_bytes_before_external_sort = 536870912;      -- 512 Mio → spill disque
-SET use_skip_indexes = 0;                            -- l'index ngram n'aide pas ici, il coûte de la RAM
--- Gros blocs d'insertion (1 Gio) : un INSERT ... SELECT de milliards de
--- lignes crée une part par bloc (~1 M de lignes par défaut) ; avec des
--- blocs 16x plus gros, les merges suivent au lieu de TOO_MANY_PARTS.
-SET min_insert_block_size_rows = 100000000;
-SET min_insert_block_size_bytes = 1073741824;
-
--- ---------- 0) nettoyage / validation → stg_domain_norm ----------
+--
 -- ip, cn et chaque entrée de dns passent par la même règle (lambda unique
 -- appliquée à [ip, cn, dns...]) :
 --   normalisation : espaces retirés, minuscules, point final retiré
@@ -71,9 +56,3 @@ FROM (
                       arrayConcat([ip, cn], dns))) AS n
     FROM stg_domain
 );
-
-DROP TABLE stg_domain;
-
--- stg_domain_norm n'est plus que lue (06_import_domains.sql, report_domains) :
--- inutile de la fusionner (SYSTEM START MERGES en fin de distribution).
-SYSTEM STOP MERGES stg_domain_norm;

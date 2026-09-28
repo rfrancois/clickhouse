@@ -4,8 +4,8 @@
 plus alimentées).
 
 Usage : make import FILE=<archive.zip | fichier | dossier>
-        make import-resume   (reprend la distribution après un échec, sans
-                              recharger les fichiers)
+        make import-resume   (CSV : reprend la distribution après un échec,
+                              sans recharger les fichiers)
 
 Fichiers reconnus (classification par nom) :
   - *node*.csv   : id;value;type;creation_date;rank        (';' + quotes)
@@ -14,40 +14,44 @@ Fichiers reconnus (classification par nom) :
                    (';' + quotes, guillemets internes échappés en \\")
   - *.json/.json.gz : {"cn":..., "dns":[...]|null, "ip":...|null}  (JSONEachRow)
 
-Pipeline (aucun parsing Python : streaming direct vers ClickHouse, tient le
-milliard de lignes) :
+domains.json[.gz] — import INCRÉMENTAL, lot par lot (import_domains) :
+  le fichier est lu par lots de IMPORT_BATCH_LINES lignes (100 000 par
+  défaut) ; chaque lot est entièrement traité par ClickHouse avant de lire
+  le suivant : nettoyage / validation (sql/05_import_normalize.sql ; un cn
+  ou dns qui est une IP est typé ip ; wildcards, IP non routables, noms
+  invalides rejetés et comptés), nœuds créés dans fqdn / ip, liens
+  cn ↔ dns / cn ↔ ip écrits dans link (deux sens). fqdn, ip et link
+  grossissent donc dès le premier lot, et la mémoire ne dépend que de la
+  taille d'un lot.
+  L'id d'une valeur existante est retrouvé dans fqdn_ids / ip_ids : tables
+  valeur → id (moteur EmbeddedRocksDB, recherche directe par clé, sans
+  relire fqdn), construites au premier import puis tenues à jour. Une
+  valeur inconnue reçoit un nouvel id AUTO-INCRÉMENTÉ (max + 1, ...),
+  rank 1000000.
+  Reprise : chaque lot validé est enregistré dans import_state (lignes
+  traitées, ids réservés) ; relancer la même commande reprend après le
+  dernier lot validé. Un lot interrompu est rejoué à l'identique (mêmes
+  ids ; lignes en double fusionnées par ReplacingMergeTree).
+
+CSV — chargement en staging puis distribution (tient le milliard de
+lignes) :
   1. extraction du .zip le cas échéant
   2. création du schéma optimisé si absent (équivalent de `make init`,
      jamais de DROP sur un schéma existant)
   3. création des tables de staging (sql/04_import_staging.sql)
-  4. chargement brut de chaque fichier (gunzip à la volée si nécessaire) :
-     - CSV : un seul INSERT en streaming via clickhouse-client ;
-     - JSON : découpé en lots de IMPORT_CHUNK_LINES lignes (10 000 par
-       défaut), un INSERT par lot via l'interface HTTP (port 8123), avec
-       progression : mémoire bornée côté serveur, même sur un fichier énorme
+  4. chargement brut de chaque fichier (gunzip à la volée si nécessaire),
+     un seul INSERT en streaming via clickhouse-client
   5. distribution vers les tables optimisées :
      - node.csv → <type> selon le type (fqdn, ip, application,
        plugin, ... cf. NODE_TABLES), avec ses propres ids (distribute_nodes)
      - properties.csv → property, id_node déjà numérique, sans résolution
        (distribute_properties)
-     - domains.json → normalisation et validation de chaque valeur
-       (sql/05_import_normalize.sql ; données non fiables : un cn ou dns qui
-       est une IP est typé ip, jamais versé dans fqdn ; wildcards, IP non
-       routables, noms invalides rejetés et comptés), puis valeurs
-       (stg_value) et liens cn ↔ dns / cn ↔ ip (stg_link), sans id
-       (sql/06_import_domains.sql)
-     - puis distribute_links, en tranches (pour tenir en RAM sur une VM
-       Docker modeste) : résolution valeur → id ; toute valeur absente de
-       sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
-       type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
-       DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même).
-       Reprenable tranche par tranche (make import-resume).
-
-Reprise : chaque étape de distribution ne s'exécute que si sa table de
-staging d'entrée existe encore, et la supprime une fois finie. Après un
-échec (TOO_MANY_PARTS, mémoire...), `make import-resume` reprend donc à
-l'étape interrompue, sans refaire le chargement (des heures sur un gros
-domains.json).
+     - links.csv → distribute_links, en tranches (pour tenir en RAM sur une
+       VM Docker modeste) : résolution valeur → id ; toute valeur absente
+       de sa table reçoit un nouvel id AUTO-INCRÉMENTÉ ; chaque lien est
+       inséré dans link DANS LES DEUX SENS, sauf les auto-liens. Chaque
+       étape ne s'exécute que si sa table d'entrée existe encore :
+       `make import-resume` reprend à l'étape interrompue.
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
 (A→B et B→A) pour qu'un simple filtre sur (type_1, id_1) retrouve les voisins
@@ -55,12 +59,15 @@ dans les deux sens. Toute future écriture sur link (update, suppression) doit
 donc traiter les deux lignes ensemble pour rester cohérente.
 """
 import http.client
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 import zipfile
 import zlib
 from pathlib import Path
@@ -69,12 +76,10 @@ from urllib.parse import urlencode
 ROOT = Path(__file__).resolve().parent.parent
 SQL_STAGING = ROOT / "sql" / "04_import_staging.sql"
 SQL_NORMALIZE = ROOT / "sql" / "05_import_normalize.sql"
-SQL_DOMAINS = ROOT / "sql" / "06_import_domains.sql"
-# tables de travail d'un import (staging + intermédiaires de distribute_links)
-# : leur présence indique un import interrompu, à reprendre
-STAGING = ("stg_node", "stg_property", "stg_domain", "stg_domain_norm",
-           "stg_value", "stg_link", "tmp_node_map_done", "tmp_node_ids",
-           "tmp_link_1", "tmp_link_2")
+# tables de travail d'un import CSV (staging + intermédiaires de
+# distribute_links) : leur présence indique un import interrompu, à reprendre
+STAGING = ("stg_node", "stg_property", "stg_link", "tmp_node_map_done",
+           "tmp_node_ids", "tmp_link_1", "tmp_link_2")
 
 # Types de nœuds (ceux de l'Enum8 de link / property) → colonne id de leur
 # table de valeurs (la table porte le nom du type). Seuls fqdn et ip ont un
@@ -99,23 +104,29 @@ USER, PASSWORD = "chuser", "Royal15Raccoon"
 CLIENT = ["docker", "exec", "-i", "ch_container", "clickhouse-client",
           "--user", USER, "--password", PASSWORD]
 
-# Interface HTTP (port exposé par docker-compose.yml) : chargement des JSON
-# par lots, sans lancer un `docker exec` par lot.
+# Interface HTTP (port exposé par docker-compose.yml) : import des JSON lot
+# par lot, ~1 ms par requête au lieu de ~100 ms pour un `docker exec`.
 HTTP_HOST = os.environ.get("CLICKHOUSE_HOST", "localhost")
 HTTP_PORT = int(os.environ.get("CLICKHOUSE_HTTP_PORT", "8123"))
 
-# tolérance aux lignes malformées (données réelles). Pour les JSON chargés par
-# lots, elle s'applique à chaque lot.
+# tolérance aux lignes malformées (données réelles). Pour les JSON, elle
+# s'applique à chaque lot.
 TOLER_SETTINGS = {"input_format_allow_errors_num": 1000,
                   "input_format_allow_errors_ratio": 0.001}
 TOLER = [f"--{k}={v}" for k, v in TOLER_SETTINGS.items()]
+# domains.json : ne PAS lire un objet JSON comme une chaîne (réglage actif
+# par défaut) : sinon, après une ligne tronquée ("dns": [ jamais fermé), les
+# lignes suivantes sont avalées comme éléments de dns jusqu'à la fin du bloc
+# de lecture, puis rejetées ensemble — des milliers de lignes perdues.
+JSON_SETTINGS = {**TOLER_SETTINGS, "input_format_json_read_objects_as_strings": 0}
 
-# Lignes par INSERT pour les JSON (surchargeable via IMPORT_CHUNK_LINES).
-# Chaque lot crée une part dans stg_domain, fusionnée en arrière-plan : des
-# lots plus gros (100000) vont plus vite, au prix d'un peu plus de RAM.
-CHUNK_LINES = int(os.environ.get("IMPORT_CHUNK_LINES", "10000"))
-# Lot refusé faute de ressources (rien n'est inséré : un lot = un bloc =
-# une part, atomique) → on attend et on renvoie le même lot.
+# domains.json : lignes par lot (surchargeable via IMPORT_BATCH_LINES). Plus
+# gros = plus rapide au total (moins de requêtes), progression moins fine.
+BATCH_LINES = int(os.environ.get("IMPORT_BATCH_LINES", "100000"))
+# tables valeur → id (EmbeddedRocksDB) des types alimentés par domains.json
+LOOKUP = {"fqdn": "fqdn_ids", "ip": "ip_ids"}
+# Requête d'un lot refusée faute de ressources (un lot = un bloc = une part,
+# atomique : rien n'est inséré) → on attend et on la renvoie.
 #   241 MEMORY_LIMIT_EXCEEDED, 252 TOO_MANY_PARTS (merges en retard)
 RETRY_CODES = {"241", "252"}
 RETRIES = 8
@@ -195,9 +206,10 @@ def progress(done: int, total: int, lines: int, elapsed: float,
         print(msg, flush=True)
 
 
-def query(sql: str, mem: bool = False) -> str:
-    r = subprocess.run(CLIENT + DROP_OK + (MEM if mem else []) + ["-q", sql],
-                       capture_output=True, text=True)
+def query(sql: str, mem: bool = False, qid: str = "") -> str:
+    r = subprocess.run(CLIENT + DROP_OK + (MEM if mem else [])
+                       + ([f"--query_id={qid}"] if qid else []) + ["-q", sql],
+                       capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
         # message du serveur visible (sinon perdu dans capture_output)
         log(r.stderr.strip())
@@ -243,6 +255,10 @@ def distribute_nodes() -> None:
             "toUnixTimestamp(now())) "
             f"FROM stg_node WHERE lower(node_type) = '{typ}' AND value != ''",
             mem=True)
+        if typ in LOOKUP and exists(LOOKUP[typ]):  # table valeur → id à jour
+            query(f"INSERT INTO {LOOKUP[typ]} SELECT value, toInt64OrZero(id) "
+                  f"FROM stg_node WHERE lower(node_type) = '{typ}' AND value != ''",
+                  mem=True)
         log(f"  {typ} : {int(cnt):,} lignes")
     query("DROP TABLE IF EXISTS stg_node")
 
@@ -294,35 +310,14 @@ def distribute_properties() -> None:
     query("DROP TABLE IF EXISTS stg_property")
 
 
-def report_domains() -> None:
-    """Affiche les valeurs de domains.json rejetées par la validation de
-    sql/05_import_normalize.sql, par champ et par raison, puis supprime
-    stg_domain_norm."""
-    if not exists("stg_domain_norm"):
-        return
-    rows = query(
-        "SELECT field, reason, count() FROM ("
-        " SELECT 'ip' AS field, ip.1 AS reason FROM stg_domain_norm"
-        " UNION ALL SELECT 'cn', cn.1 FROM stg_domain_norm"
-        " UNION ALL SELECT 'dns', arrayJoin(dns).1 FROM stg_domain_norm"
-        ") WHERE startsWith(reason, 'x_') GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV",
-        mem=True)
-    if rows:
-        log("Valeurs de domains.json rejetées (ni nœud ni lien) :")
-        for line in rows.splitlines():
-            field, reason, cnt = line.split("\t")
-            log(f"  {field:<3} {reason[2:]:<12} : {int(cnt):,}")
-    query("DROP TABLE IF EXISTS stg_domain_norm")
-
-
 def build_node_map(n: int) -> None:
     """3a / 3a bis : table de correspondance (type, valeur) → id des valeurs
-    citées par stg_link / stg_value, en n tranches, avec création des nœuds
+    citées par stg_link, en n tranches, avec création des nœuds
     inconnus (ids auto-incrémentés). Terminée, elle est renommée
     tmp_node_map_done : une reprise ne la reconstruit pas (et ne recrée pas
     de nœuds)."""
     # 3a — table de correspondance (type, valeur) → id, restreinte aux valeurs
-    # citées par les liens ou par domains.json, construite tranche par tranche.
+    # citées par les liens, construite tranche par tranche.
     query("DROP TABLE IF EXISTS tmp_link_values")
     query("CREATE TABLE tmp_link_values (node_type String, value String) "
           "ENGINE = MergeTree ORDER BY (node_type, value)")
@@ -339,9 +334,6 @@ def build_node_map(n: int) -> None:
             " UNION ALL"
             " SELECT lower(type_2), id_node_2 FROM stg_link"
             f"  WHERE cityHash64(id_node_2) % {n} = {k}"
-            " UNION ALL"
-            " SELECT node_type, value FROM stg_value"
-            f"  WHERE cityHash64(value) % {n} = {k}"
             f") WHERE value != '' AND node_type IN ({TYPES_SQL}) "
             "GROUP BY node_type, value", mem=True)
     # types réellement cités : inutile de parcourir les tables des autres
@@ -383,6 +375,9 @@ def build_node_map(n: int) -> None:
             "toUnixTimestamp(now()) "
             f"FROM tmp_node_map WHERE node_type = '{typ}' AND id > {start}",
             mem=True)
+        if typ in LOOKUP and exists(LOOKUP[typ]):  # table valeur → id à jour
+            query(f"INSERT INTO {LOOKUP[typ]} SELECT value, id FROM tmp_node_map "
+                  f"WHERE node_type = '{typ}' AND id > {start}", mem=True)
         log(f"  {base - start:,} nœuds {typ} créés "
             f"(ids {start + 1:,} → {base:,})" if base > start
             else f"  aucun nœud {typ} créé")
@@ -422,8 +417,7 @@ def to_ts(col: str) -> str:
 def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
     """Attribue les ids manquants puis résout stg_link → link.
 
-    Valeurs traitées : les extrémités de stg_link (links.csv + liens de
-    domains.json) et les valeurs de domains.json (stg_value), pour tous les
+    Valeurs traitées : les extrémités de stg_link (links.csv), pour tous les
     types de NODE_TABLES. Une valeur déjà présente dans la table <type>
     garde son id ; une valeur absente est créée avec un nouvel id
     AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
@@ -463,14 +457,11 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
     else:
         if not exists("stg_link"):
             return
-        if query("SELECT (SELECT count() FROM stg_link) + "
-                 "(SELECT count() FROM stg_value)") == "0":
-            for tbl in ("stg_link", "stg_value"):
-                query(f"DROP TABLE IF EXISTS {tbl}")
+        if count("stg_link") == 0:
+            query("DROP TABLE IF EXISTS stg_link")
             return
         log("Résolution des nœuds et des liens → link...")
-        for tbl in ("stg_link", "stg_value"):
-            log(f"  {tbl} : {int(query(f'SELECT count() FROM {tbl}')):,} lignes")
+        log(f"  stg_link : {count('stg_link'):,} lignes")
         if exists("tmp_node_map_done"):
             log("  correspondance valeur → id déjà construite (reprise)")
         else:
@@ -486,7 +477,7 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
         check(src > 0 and dst == src,
               f"copie de la correspondance incomplète ({dst:,} / {src:,} lignes)")
         query("RENAME TABLE tmp_node_ids_build TO tmp_node_ids")
-        for tbl in ("tmp_node_map_done", "tmp_link_values", "stg_value"):
+        for tbl in ("tmp_node_map_done", "tmp_link_values"):
             query(f"DROP TABLE IF EXISTS {tbl}")
         log(f"  correspondance : {dst:,} valeurs, découpée en {m} tranches en "
             f"{duration(time.monotonic() - t)}")
@@ -586,32 +577,17 @@ def distribute_links(n: int = LINK_SLICES, m: int = JOIN_SLICES) -> None:
     query("DROP TABLE IF EXISTS tmp_node_ids")
 
 
-def reset_domain_links() -> None:
-    """Reprise : 06_import_domains.sql a pu s'arrêter en cours de route (un
-    INSERT ... SELECT interrompu laisse ses parts déjà écrites). On efface ce
-    qu'il produit — stg_value, et les liens de stg_link issus de domains.json
-    (id_source '0', dates vides) — avant de le rejouer."""
-    log("  reprise : effacement de stg_value et des liens de domains.json...")
-    query("TRUNCATE TABLE stg_value")
-    cond = "id_source = '0' AND creation_date = '' AND update_date = ''"
-    if query(f"SELECT count() FROM stg_link WHERE NOT ({cond})") == "0":
-        query("TRUNCATE TABLE stg_link")
-    else:  # liens CSV présents : on ne retire que ceux de domains.json
-        query(f"DELETE FROM stg_link WHERE {cond}", mem=True)
-
-
 def distribute(resume: bool = False) -> None:
-    """staging → tables optimisées. Chaque étape ne s'exécute que si sa table
+    """staging CSV → tables optimisées. Chaque étape ne s'exécute que si sa table
     d'entrée existe encore (elle la supprime une fois finie) : après un
     échec, resume=True reprend à l'étape interrompue."""
     log("Distribution vers les tables optimisées...")
     t = time.monotonic()
     # Les tables de staging chargées ne sont plus que lues : on suspend leurs
-    # merges (stg_domain surtout : une part par lot), qui concurrencent la
-    # distribution en mémoire. PAS de SYSTEM STOP MERGES global : les tables
+    # merges, qui concurrencent la distribution en mémoire. PAS de SYSTEM STOP MERGES global : les tables
     # écrites ici (stg_link, link, fqdn...) reçoivent des milliards de lignes
     # et finissent en TOO_MANY_PARTS si leurs parts ne sont pas fusionnées.
-    for tbl in ("stg_node", "stg_property", "stg_domain"):
+    for tbl in ("stg_node", "stg_property"):
         if exists(tbl):
             query(f"SYSTEM STOP MERGES {tbl}")
     try:
@@ -619,18 +595,7 @@ def distribute(resume: bool = False) -> None:
         query("SYSTEM DROP UNCOMPRESSED CACHE")
         distribute_nodes()  # node.csv → <type>
         distribute_properties()  # properties.csv → property
-        if exists("stg_domain"):  # domains.json → stg_domain_norm
-            if resume:  # normalisation interrompue : on la refait entière
-                query("TRUNCATE TABLE IF EXISTS stg_domain_norm")
-            log("Normalisation de domains.json...")
-            run_sql_file(SQL_NORMALIZE)
-        if exists("stg_domain_norm"):  # → stg_value / stg_link
-            if resume:
-                reset_domain_links()
-            log("Extraction des valeurs et liens de domains.json...")
-            run_sql_file(SQL_DOMAINS)
-        report_domains()  # valeurs de domains.json rejetées
-        distribute_links()  # ids auto-incrémentés + liens (CSV et domains.json)
+        distribute_links()  # links.csv : ids auto-incrémentés + liens
     finally:
         query("SYSTEM START MERGES")
     log(f"  fait en {time.monotonic() - t:.0f} s")
@@ -689,14 +654,24 @@ def iter_blocks(path: Path):
                 "(gzip -t pour vérifier).")
 
 
-def iter_line_chunks(path: Path, n: int):
+def iter_line_chunks(path: Path, n: int, skip: int = 0):
     """Découpe le fichier (décompressé à la volée) en lots de n lignes
-    complètes. Émet (lot en bytes, nb de lignes, octets lus du fichier brut).
+    complètes, après avoir sauté les `skip` premières lignes (reprise).
+    Émet (lot en bytes, nb de lignes, octets lus du fichier brut).
     Seuls un bloc de 1 Mio et un lot sont en mémoire à la fois."""
     pending = b""
     lines = []
     pos = 0
     for block, pos in iter_blocks(path):
+        if skip:  # lignes déjà importées : on compte les \n sans découper
+            c = block.count(b"\n")
+            if c < skip:
+                skip -= c
+                continue
+            i = -1
+            for _ in range(skip):
+                i = block.index(b"\n", i + 1)
+            block, skip = block[i + 1:], 0
         parts = (pending + block).split(b"\n")
         pending = parts.pop()  # dernière ligne, incomplète
         lines.extend(parts)
@@ -709,74 +684,312 @@ def iter_line_chunks(path: Path, n: int):
         yield b"\n".join(lines) + b"\n", len(lines), pos
 
 
-class HttpInsert:
-    """INSERT répétés dans une table via l'interface HTTP de ClickHouse
-    (connexion keep-alive réutilisée d'un lot à l'autre)."""
+class Http:
+    """Requêtes via l'interface HTTP de ClickHouse (connexion keep-alive
+    réutilisée d'une requête à l'autre)."""
 
-    def __init__(self, table: str, fmt: str, settings: dict):
-        self.path = "/?" + urlencode(
-            {"query": f"INSERT INTO {table} FORMAT {fmt}", **settings})
+    def __init__(self):
         self.headers = {"X-ClickHouse-User": USER,
                         "X-ClickHouse-Key": PASSWORD,
                         "Content-Type": "application/octet-stream"}
         self.conn = None
+        self.written = 0  # lignes écrites par la dernière requête
 
     def close(self) -> None:
         if self.conn is not None:
             self.conn.close()
             self.conn = None
 
-    def send(self, body: bytes) -> None:
+    def run(self, sql: str, data: bytes = None, **settings) -> str:
+        """Exécute sql (ou `INSERT ... FORMAT x` avec data en corps)."""
+        params = {"wait_end_of_query": 1, **settings}
+        if data is None:
+            body = sql.encode()
+        else:
+            params["query"] = sql
+            body = data
+        path = "/?" + urlencode(params)
         for attempt in range(RETRIES):
             try:
                 if self.conn is None:
                     self.conn = http.client.HTTPConnection(
                         HTTP_HOST, HTTP_PORT, timeout=3600)
-                self.conn.request("POST", self.path, body, self.headers)
+                self.conn.request("POST", path, body, self.headers)
                 r = self.conn.getresponse()
                 msg = r.read().decode("utf-8", "replace").strip()
             except (OSError, http.client.HTTPException) as e:
-                # pas de nouvel essai : on ne sait pas si le lot est passé
                 self.close()
-                sys.exit(f"ClickHouse HTTP injoignable ({HTTP_HOST}:{HTTP_PORT}) : "
-                         f"{e}\n  → le port 8123 est-il exposé ? (docker-compose.yml)")
+                raise RuntimeError(
+                    f"ClickHouse HTTP injoignable ({HTTP_HOST}:{HTTP_PORT}) : {e}\n"
+                    "  → le port 8123 est-il exposé ? (docker-compose.yml)")
             if r.status == 200:
-                return
+                summary = json.loads(r.getheader("X-ClickHouse-Summary") or "{}")
+                self.written = int(summary.get("written_rows", 0))
+                return msg
             code = r.getheader("X-ClickHouse-Exception-Code", "")
             if code not in RETRY_CODES:
-                raise RuntimeError(f"INSERT refusé (HTTP {r.status}) : {msg[:2000]}")
+                raise RuntimeError(f"Requête refusée (HTTP {r.status}) : "
+                                   f"{msg[:2000]}\n  requête : {sql[:300]}")
             wait = min(60, 2 ** attempt)
-            log(f"  lot refusé (code {code}), nouvel essai dans {wait} s : "
+            log(f"  requête refusée (code {code}), nouvel essai dans {wait} s : "
                 f"{msg.splitlines()[0][:200] if msg else ''}")
             time.sleep(wait)
-        raise RuntimeError(f"INSERT refusé après {RETRIES} essais : {msg[:2000]}")
+        raise RuntimeError(f"Requête refusée après {RETRIES} essais : {msg[:2000]}")
 
 
-def load_chunked(path: Path, table: str, fmt: str,
-                 n: int = CHUNK_LINES) -> None:
-    """Charge un fichier à une ligne par enregistrement (JSONEachRow) par
-    lots de n lignes, un INSERT HTTP par lot, avec progression."""
-    total = path.stat().st_size
-    ins = HttpInsert(table, fmt, TOLER_SETTINGS)
-    lines = 0
-    pos = 0
-    t0 = last = time.monotonic()
-    every = 1 if sys.stdout.isatty() else 30
+def query_with_progress(sql: str) -> None:
+    """Longue requête (clickhouse-client) avec progression lue dans
+    system.processes."""
+    qid = f"import_{uuid.uuid4().hex}"
+    err = []
+
+    def target():
+        try:
+            query(sql, mem=True, qid=qid)
+        except Exception as e:  # relancée dans le thread principal
+            err.append(e)
+
+    th = threading.Thread(target=target)
+    th.start()
+    t0 = time.monotonic()
+    while th.is_alive():
+        th.join(5)
+        row = query("SELECT read_rows, total_rows_approx FROM system.processes "
+                    f"WHERE query_id = '{qid}' FORMAT TSV")
+        if row:
+            done, total = map(int, row.split("\t"))
+            progress(done, total, done, time.monotonic() - t0)
+    if err:
+        raise err[0]
+    log(f"  fait en {duration(time.monotonic() - t0)}")
+
+
+def build_lookups() -> None:
+    """fqdn_ids / ip_ids : tables valeur → id (EmbeddedRocksDB, clé = valeur)
+    construites une fois depuis fqdn / ip, puis tenues à jour par chaque
+    import. Construites sous un nom provisoire puis renommées : une table
+    présente est toujours complète."""
+    for typ, lk in LOOKUP.items():
+        if exists(lk):
+            continue
+        n = count(typ)
+        log(f"Construction de {lk} (valeur → id) depuis {typ} : {n:,} lignes "
+            "(une seule fois)...")
+        query(f"DROP TABLE IF EXISTS {lk}_build")
+        query(f"CREATE TABLE {lk}_build (value String, id Int64) "
+              "ENGINE = EmbeddedRocksDB PRIMARY KEY value")
+        query_with_progress(f"INSERT INTO {lk}_build SELECT value, {NODE_TABLES[typ]} "
+                            f"FROM {typ}")
+        query(f"RENAME TABLE {lk}_build TO {lk}")
+
+
+def sql_str(v: str) -> str:
+    return "'" + v.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+# Un lot de domains.json, une fois dans stg_domain puis normalisé dans
+# stg_domain_norm (05_import_normalize.sql) :
+#   valeurs retenues (fqdn / ip) du lot
+DOM_VALUES = """
+INSERT INTO dom_values
+SELECT DISTINCT t.1, t.2
+FROM (SELECT arrayJoin(arrayConcat([ip, cn], dns)) AS t FROM stg_domain_norm)
+WHERE t.1 IN ('fqdn', 'ip')"""
+#   liens cn ↔ dns et cn ↔ ip, résolus par dom_map (valeur → id du lot),
+#   écrits dans les DEUX sens, sans auto-liens
+DOM_LINKS = """
+INSERT INTO link (type_1, id_1, type_2, id_2, id_source, detection_date, version)
+SELECT l.1, l.2, l.3, l.4, 0, toUnixTimestamp(now()), toUnixTimestamp(now())
+FROM (
+    SELECT arrayJoin([(p.t1, a.id, p.t2, b.id), (p.t2, b.id, p.t1, a.id)]) AS l
+    FROM (
+        SELECT DISTINCT t1, v1, t2, v2 FROM (
+            SELECT cn.1 AS t1, cn.2 AS v1, x.1 AS t2, x.2 AS v2
+            FROM (SELECT cn, arrayJoin(dns) AS x FROM stg_domain_norm
+                  WHERE cn.1 IN ('fqdn', 'ip'))
+            WHERE x.1 IN ('fqdn', 'ip') AND x != cn
+            UNION ALL
+            SELECT cn.1, cn.2, 'ip', ip.2 FROM stg_domain_norm
+            WHERE cn.1 IN ('fqdn', 'ip') AND ip.1 = 'ip' AND ip != cn)
+    ) AS p
+    INNER JOIN dom_map AS a ON a.node_type = p.t1 AND a.value = p.v1
+    INNER JOIN dom_map AS b ON b.node_type = p.t2 AND b.value = p.v2
+    WHERE NOT (p.t1 = p.t2 AND a.id = b.id))"""
+#   valeurs rejetées par la validation, par champ et par raison
+DOM_REJECTS = """
+SELECT field, reason, count() FROM (
+    SELECT 'ip' AS field, ip.1 AS reason FROM stg_domain_norm
+    UNION ALL SELECT 'cn', cn.1 FROM stg_domain_norm
+    UNION ALL SELECT 'dns', arrayJoin(dns).1 FROM stg_domain_norm)
+WHERE startsWith(reason, 'x_') GROUP BY 1, 2"""
+DOM_TABLES = {
+    "stg_domain": "cn Nullable(String), dns Array(Nullable(String)), "
+                  "ip Nullable(String)",
+    "stg_domain_norm": "ip Tuple(String, String), cn Tuple(String, String), "
+                       "dns Array(Tuple(String, String))",
+    "dom_values": "node_type String, value String",
+    "dom_map": "node_type String, value String, id Int64",
+    "dom_new": "node_type String, value String, id Int64",
+}
+
+
+def import_domains(path: Path, n: int = BATCH_LINES) -> None:
+    """domains.json[.gz] → fqdn / ip / link, lot par lot (cf. docstring du
+    module). Relancer la même commande reprend après le dernier lot validé."""
+    h = Http()
+    q = h.run
+    key = f"{path.name}:{path.stat().st_size}"  # identifie le fichier
+
+    def state(k: str) -> int:
+        v = q(f"SELECT value FROM import_state WHERE key = {sql_str(k)}")
+        return int(v) if v else 0
+
+    def save(**kv) -> None:
+        q("INSERT INTO import_state VALUES "
+          + ", ".join(f"({sql_str(k)}, {v})" for k, v in kv.items()))
+
+    def tsv(sql: str) -> list:
+        return [line.split("\t") for line in q(sql + " FORMAT TSV").splitlines()]
+
     try:
-        for body, cnt, pos in iter_line_chunks(path, n):
-            ins.send(body)
+        q("CREATE TABLE IF NOT EXISTS import_state (key String, value Int64) "
+          "ENGINE = EmbeddedRocksDB PRIMARY KEY key")
+        if state(f"done:{key}"):
+            log(f"  déjà importé entièrement ({state(f'lines:{key}'):,} lignes) : "
+                "ignoré.\n  → pour le réimporter : DELETE FROM import_state "
+                f"WHERE key LIKE '%:{key}'")
+            return
+        build_lookups()
+        for tbl, cols in DOM_TABLES.items():  # tables d'un lot, en mémoire
+            q(f"CREATE OR REPLACE TABLE {tbl} ({cols}) ENGINE = Memory")
+        normalize = SQL_NORMALIZE.read_text(encoding="utf-8").strip().rstrip(";")
+
+        # alloc : plus grand id réservé (enregistré AVANT d'écrire les nœuds)
+        # nodes : plus grand id dont le nœud est écrit dans sa table
+        # Un lot interrompu entre les deux est rejoué : ses nœuds (ids entre
+        # nodes et alloc) sont retrouvés dans fqdn_ids / ip_ids et réécrits.
+        alloc, nodes = {}, {}
+        for typ in LOOKUP:
+            top = int(q(f"SELECT max({NODE_TABLES[typ]}) FROM {typ}"))
+            alloc[typ] = max(top, state(f"alloc:{typ}"))
+            nodes[typ] = max(top, state(f"nodes:{typ}"))
+        done = state(f"lines:{key}")
+        if done:
+            log(f"  reprise après {done:,} lignes déjà importées "
+                "(lecture du début du fichier pour les sauter)...")
+    except Exception:
+        h.close()
+        raise
+
+    created = dict.fromkeys(LOOKUP, 0)
+    links = lines = unreadable = 0
+    rejects = {}
+    total = path.stat().st_size
+    t0 = last = time.monotonic()
+    every = 0 if sys.stdout.isatty() else 30
+    pos = 0
+
+    def show(end: bool = False) -> None:
+        global _progress_open
+        el = time.monotonic() - t0
+        pct = 100 * pos / total if total else 100.0
+        msg = (f"  [{pct:5.1f} %] {done:,} lignes · fqdn +{created['fqdn']:,} · "
+               f"ip +{created['ip']:,} · liens +{links:,} · "
+               f"{lines / el if el else 0:,.0f} lignes/s")
+        if not end and first and pos > first[1]:
+            # estimation sur ce qui a été traité pendant CETTE exécution
+            # (une reprise saute le début du fichier sans le traiter)
+            t1, p1 = first
+            msg += (f" · reste ~"
+                    f"{duration((time.monotonic() - t1) * (total - pos) / (pos - p1))}")
+        if sys.stdout.isatty():
+            print("\r" + msg.ljust(110), end="\n" if end else "", flush=True)
+            _progress_open = not end
+        else:
+            print(msg, flush=True)
+
+    first = None  # (instant, position) à la fin du premier lot de cette exécution
+    try:
+        for body, cnt, pos in iter_line_chunks(path, n, skip=done):
+            if not lines:
+                t0 = time.monotonic()  # sans le temps passé à sauter le début
+            for tbl in DOM_TABLES:
+                q(f"TRUNCATE TABLE {tbl}")
+            q("INSERT INTO stg_domain FORMAT JSONEachRow", body, **JSON_SETTINGS)
+            blank = sum(1 for line in body.split(b"\n")[:-1] if not line.strip())
+            unreadable += cnt - blank - h.written
+            q(normalize)
+            q(DOM_VALUES)
+            # ids existants : recherche directe par clé dans fqdn_ids / ip_ids
+            for typ, lk in LOOKUP.items():
+                q(f"INSERT INTO dom_map SELECT '{typ}', v.value, r.id "
+                  f"FROM (SELECT value FROM dom_values WHERE node_type = '{typ}') AS v "
+                  f"INNER JOIN {lk} AS r ON r.value = v.value "
+                  "SETTINGS join_algorithm = 'direct'")
+            # valeurs inconnues : nouveaux ids à la suite du plus grand connu
+            seen = dict(tsv("SELECT node_type, max(id) FROM dom_map GROUP BY node_type"))
+            for typ in LOOKUP:
+                base = max(alloc[typ], int(seen.get(typ, 0)))
+                q(f"INSERT INTO dom_new SELECT '{typ}', value, "
+                  f"toInt64({base} + row_number() OVER (ORDER BY value)) "
+                  f"FROM dom_values WHERE node_type = '{typ}' AND value NOT IN "
+                  f"(SELECT value FROM dom_map WHERE node_type = '{typ}')")
+            new = {t: int(mx) for t, mx in tsv(
+                "SELECT node_type, max(id) FROM dom_new GROUP BY node_type")}
+            if new:
+                for typ, mx in new.items():
+                    alloc[typ] = max(alloc[typ], mx)
+                save(**{f"alloc:{t}": alloc[t] for t in LOOKUP})  # réservation
+                for typ in new:
+                    q(f"INSERT INTO {LOOKUP[typ]} SELECT value, id FROM dom_new "
+                      f"WHERE node_type = '{typ}'")
+                q("INSERT INTO dom_map SELECT * FROM dom_new")
+            # nœuds pas encore écrits (créés par ce lot, ou par un essai
+            # interrompu de ce même lot)
+            for typ in LOOKUP:
+                q(f"INSERT INTO {typ} (value, {NODE_TABLES[typ]}, rank, version) "
+                  f"SELECT value, id, {NEW_RANK}, toUnixTimestamp(now()) FROM dom_map "
+                  f"WHERE node_type = '{typ}' AND id > {nodes[typ]}")
+                created[typ] += h.written
+            q(DOM_LINKS)
+            links += h.written
+            for field, reason, c in tsv(DOM_REJECTS):
+                rejects[(field, reason)] = rejects.get((field, reason), 0) + int(c)
+            # lot validé
+            nodes = dict(alloc)
+            done += cnt
             lines += cnt
+            save(**{f"lines:{key}": done}, **{f"nodes:{t}": nodes[t] for t in LOOKUP})
             now = time.monotonic()
+            if first is None:
+                first = (now, pos)
             if now - last >= every:
-                progress(pos, total, lines, now - t0)
+                show()
                 last = now
+        show(end=True)
+        save(**{f"done:{key}": 1})
+    except BaseException:
+        log(f"\nImport de {path.name} interrompu : {done:,} lignes validées "
+            "(fqdn / ip / link à jour jusque-là).\n  → relancer la même commande "
+            "reprend après le dernier lot validé.")
+        raise
     finally:
-        ins.close()
-    progress(pos, total, lines, time.monotonic() - t0, end=True)
+        try:
+            for tbl in DOM_TABLES:
+                q(f"DROP TABLE IF EXISTS {tbl}")
+        except Exception:
+            pass
+        h.close()
+        if unreadable:
+            log(f"Lignes JSON illisibles, ignorées : {unreadable:,}")
+        if rejects:
+            log("Valeurs rejetées (ni nœud ni lien) :")
+            for (field, reason), c in sorted(rejects.items()):
+                log(f"  {field:<3} {reason[2:]:<12} : {c:,}")
 
 
 def classify(path: Path):
-    """Retourne ('stg_node'|'stg_link'|'stg_property'|'stg_domain', format,
+    """Retourne ('stg_node'|'stg_link'|'stg_property'|'domains', format,
     settings) ou None."""
     n = path.name.lower()
     csv_settings = ["--format_csv_delimiter=;",
@@ -796,7 +1009,7 @@ def classify(path: Path):
     if n.endswith(".csv") and ("link" in n or "edge" in n):
         return "stg_link", "CSV", csv_settings
     if ".json" in n:
-        return "stg_domain", "JSONEachRow", []
+        return "domains", "JSONEachRow", []
     return None
 
 
@@ -876,20 +1089,15 @@ def main() -> None:
                      "(attendus : *node*.csv, *link*.csv, *propert*.csv, "
                      "*.json[.gz]).")
 
-        log("Création des tables de staging...")
-        run_sql_file(SQL_STAGING)
-
         t0 = time.monotonic()
-        for f, table, fmt, settings in jobs:
+        csv_jobs = [j for j in jobs if j[1] != "domains"]
+        if csv_jobs:
+            log("Création des tables de staging...")
+            run_sql_file(SQL_STAGING)
+        for f, table, fmt, settings in csv_jobs:
             size = f.stat().st_size / 2**20
             log(f"Chargement {f.name} ({size:.1f} Mio) → {table} [{fmt}]...")
             t = time.monotonic()
-            if fmt == "JSONEachRow":
-                # une ligne = un enregistrement : découpage en lots sans risque
-                load_chunked(f, table, fmt)
-                n = query(f"SELECT count() FROM {table}")
-                log(f"  {int(n):,} lignes en staging en {time.monotonic() - t:.0f} s")
-                continue
             cmd = CLIENT + TOLER + settings \
                 + ["--query", f"INSERT INTO {table} FORMAT {fmt}"]
             # ATTENTION : on ne peut PAS passer un gzip.GzipFile en
@@ -914,13 +1122,20 @@ def main() -> None:
             n = query(f"SELECT count() FROM {table}")
             log(f"  {int(n):,} lignes en staging en {time.monotonic() - t:.0f} s")
 
-        try:
-            distribute()
-        except (subprocess.CalledProcessError, RuntimeError):
-            log("\nDistribution interrompue. Les données chargées sont "
-                "conservées en staging :\n  → après correction, reprendre "
-                "sans recharger : make import-resume")
-            raise
+        if csv_jobs:
+            try:
+                distribute()
+            except (subprocess.CalledProcessError, RuntimeError):
+                log("\nDistribution interrompue. Les données chargées sont "
+                    "conservées en staging :\n  → après correction, reprendre "
+                    "sans recharger : make import-resume")
+                raise
+        # domains.json après les CSV : node.csv a pu créer des nœuds
+        for f, table, fmt, settings in jobs:
+            if table == "domains":
+                log(f"Import de {f.name} ({f.stat().st_size / 2**20:.1f} Mio) "
+                    f"par lots de {BATCH_LINES:,} lignes...")
+                import_domains(f)
         print_counts(t0)
     finally:
         if tmp is not None:

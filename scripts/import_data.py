@@ -153,6 +153,11 @@ MEM = ["--max_threads=1",
        "--join_algorithm=full_sorting_merge",
        "--min_insert_block_size_rows=100000000",
        "--min_insert_block_size_bytes=1073741824"]
+# Mêmes garde-fous pour les écritures dans fqdn_ids / ip_ids (EmbeddedRocksDB),
+# mais avec les blocs d'insertion par défaut (1 M lignes / 256 Mio) : chaque
+# bloc y est trié et sérialisé d'un seul tenant, un bloc de 1 Gio dépasse les
+# 10 Gio (mesuré : 388 Mio de pic avec les blocs par défaut).
+LOOKUP_MEM = [a for a in MEM if not a.startswith("--min_insert_block_size")]
 
 # Nombre de tranches pour la distribution des liens : chaque requête ne traite
 # que 1/N des lignes → l'empreinte mémoire reste bornée même sur une VM Docker
@@ -206,8 +211,11 @@ def progress(done: int, total: int, lines: int, elapsed: float,
         print(msg, flush=True)
 
 
-def query(sql: str, mem: bool = False, qid: str = "") -> str:
-    r = subprocess.run(CLIENT + DROP_OK + (MEM if mem else [])
+def query(sql: str, mem=False, qid: str = "") -> str:
+    """mem : False, True (réglages MEM) ou une liste de réglages."""
+    if mem is True:
+        mem = MEM
+    r = subprocess.run(CLIENT + DROP_OK + (mem or [])
                        + ([f"--query_id={qid}"] if qid else []) + ["-q", sql],
                        capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
@@ -258,7 +266,7 @@ def distribute_nodes() -> None:
         if typ in LOOKUP and exists(LOOKUP[typ]):  # table valeur → id à jour
             query(f"INSERT INTO {LOOKUP[typ]} SELECT value, toInt64OrZero(id) "
                   f"FROM stg_node WHERE lower(node_type) = '{typ}' AND value != ''",
-                  mem=True)
+                  mem=LOOKUP_MEM)
         log(f"  {typ} : {int(cnt):,} lignes")
     query("DROP TABLE IF EXISTS stg_node")
 
@@ -377,7 +385,7 @@ def build_node_map(n: int) -> None:
             mem=True)
         if typ in LOOKUP and exists(LOOKUP[typ]):  # table valeur → id à jour
             query(f"INSERT INTO {LOOKUP[typ]} SELECT value, id FROM tmp_node_map "
-                  f"WHERE node_type = '{typ}' AND id > {start}", mem=True)
+                  f"WHERE node_type = '{typ}' AND id > {start}", mem=LOOKUP_MEM)
         log(f"  {base - start:,} nœuds {typ} créés "
             f"(ids {start + 1:,} → {base:,})" if base > start
             else f"  aucun nœud {typ} créé")
@@ -737,15 +745,16 @@ class Http:
         raise RuntimeError(f"Requête refusée après {RETRIES} essais : {msg[:2000]}")
 
 
-def query_with_progress(sql: str) -> None:
-    """Longue requête (clickhouse-client) avec progression lue dans
-    system.processes."""
+def query_with_progress(sql: str, total: int, mem=True) -> None:
+    """Longue requête INSERT ... SELECT (clickhouse-client) de `total` lignes,
+    avec progression sur les lignes ÉCRITES lue dans system.processes (la
+    lecture peut avoir beaucoup d'avance sur l'écriture)."""
     qid = f"import_{uuid.uuid4().hex}"
     err = []
 
     def target():
         try:
-            query(sql, mem=True, qid=qid)
+            query(sql, mem=mem, qid=qid)
         except Exception as e:  # relancée dans le thread principal
             err.append(e)
 
@@ -754,11 +763,10 @@ def query_with_progress(sql: str) -> None:
     t0 = time.monotonic()
     while th.is_alive():
         th.join(5)
-        row = query("SELECT read_rows, total_rows_approx FROM system.processes "
-                    f"WHERE query_id = '{qid}' FORMAT TSV")
+        row = query("SELECT written_rows FROM system.processes "
+                    f"WHERE query_id = '{qid}'")
         if row:
-            done, total = map(int, row.split("\t"))
-            progress(done, total, done, time.monotonic() - t0)
+            progress(int(row), total, int(row), time.monotonic() - t0)
     if err:
         raise err[0]
     log(f"  fait en {duration(time.monotonic() - t0)}")
@@ -779,7 +787,7 @@ def build_lookups() -> None:
         query(f"CREATE TABLE {lk}_build (value String, id Int64) "
               "ENGINE = EmbeddedRocksDB PRIMARY KEY value")
         query_with_progress(f"INSERT INTO {lk}_build SELECT value, {NODE_TABLES[typ]} "
-                            f"FROM {typ}")
+                            f"FROM {typ}", n, mem=LOOKUP_MEM)
         query(f"RENAME TABLE {lk}_build TO {lk}")
 
 

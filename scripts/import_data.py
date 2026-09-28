@@ -694,19 +694,38 @@ def iter_line_chunks(path: Path, n: int, skip: int = 0):
 
 class Http:
     """Requêtes via l'interface HTTP de ClickHouse (connexion keep-alive
-    réutilisée d'une requête à l'autre)."""
+    réutilisée d'une requête à l'autre).
+
+    ClickHouse ferme une connexion inactive après keep_alive_timeout (30 s
+    par défaut) : une connexion restée inactive plus de IDLE s est rouverte
+    avant la requête, et une connexion réutilisée coupée malgré tout est
+    rouverte et la requête renvoyée une fois (les étapes d'un lot sont
+    rejouables)."""
+
+    IDLE = 5  # s
 
     def __init__(self):
         self.headers = {"X-ClickHouse-User": USER,
                         "X-ClickHouse-Key": PASSWORD,
                         "Content-Type": "application/octet-stream"}
         self.conn = None
+        self.last = 0.0  # fin de la dernière réponse
         self.written = 0  # lignes écrites par la dernière requête
 
     def close(self) -> None:
         if self.conn is not None:
             self.conn.close()
             self.conn = None
+
+    def _send(self, path: str, body: bytes):
+        if self.conn is None:
+            self.conn = http.client.HTTPConnection(HTTP_HOST, HTTP_PORT,
+                                                   timeout=3600)
+        self.conn.request("POST", path, body, self.headers)
+        r = self.conn.getresponse()
+        msg = r.read().decode("utf-8", "replace").strip()
+        self.last = time.monotonic()
+        return r, msg
 
     def run(self, sql: str, data: bytes = None, **settings) -> str:
         """Exécute sql (ou `INSERT ... FORMAT x` avec data en corps)."""
@@ -718,18 +737,23 @@ class Http:
             body = data
         path = "/?" + urlencode(params)
         for attempt in range(RETRIES):
+            if self.conn is not None and time.monotonic() - self.last > self.IDLE:
+                self.close()  # probablement déjà fermée par le serveur
+            reused = self.conn is not None
             try:
-                if self.conn is None:
-                    self.conn = http.client.HTTPConnection(
-                        HTTP_HOST, HTTP_PORT, timeout=3600)
-                self.conn.request("POST", path, body, self.headers)
-                r = self.conn.getresponse()
-                msg = r.read().decode("utf-8", "replace").strip()
+                try:
+                    r, msg = self._send(path, body)
+                except (OSError, http.client.HTTPException):
+                    if not reused:
+                        raise
+                    self.close()  # connexion keep-alive fermée côté serveur
+                    r, msg = self._send(path, body)
             except (OSError, http.client.HTTPException) as e:
                 self.close()
                 raise RuntimeError(
                     f"ClickHouse HTTP injoignable ({HTTP_HOST}:{HTTP_PORT}) : {e}\n"
-                    "  → le port 8123 est-il exposé ? (docker-compose.yml)")
+                    "  → ClickHouse tourne-t-il ? port 8123 exposé ? "
+                    "(docker-compose.yml)") from e
             if r.status == 200:
                 summary = json.loads(r.getheader("X-ClickHouse-Summary") or "{}")
                 self.written = int(summary.get("written_rows", 0))

@@ -14,7 +14,7 @@ Version autonome et simplifiée de distribute_links() / distribute_properties()
     1000000 pour fqdn / ip
 
 Liens : chaque lien est un dict avec les champs
-      value_1, value_2, type_1, type_2, id_source, creation_date, update_date
+      value_1, value_2, type_1, type_2, source_uuid, creation_date, update_date
   - creation_date et update_date sont optionnels : update_date absent → now ;
     creation_date absent → update_date. link (AggregatingMergeTree) garde la
     plus ANCIENNE creation_date et la plus RÉCENTE update_date d'un lien :
@@ -24,7 +24,7 @@ Liens : chaque lien est un dict avec les champs
 
 Propriétés : chaque propriété est un dict avec les champs (mêmes noms de
 dates que properties.csv)
-      value, type, id_source, payload, version, detection_date
+      value, type, source_uuid, payload, version, detection_date
   - payload : chaîne (JSON déjà sérialisé, envoyée telle quelle) ou objet
     Python (dict, list, ...) sérialisé en JSON
   - version et detection_date sont optionnels : version absente → now ;
@@ -35,6 +35,10 @@ dates que properties.csv)
   - un même (type, valeur, source) présent plusieurs fois dans la liste :
     une seule ligne, avec le dernier payload de la liste
   - ignorées : type inconnu, valeur vide, payload absent (None)
+
+Sources : source_uuid (liens et propriétés) est résolu en id_source dans la
+table source. Une ligne dont le source_uuid est absent ou inconnu est
+ignorée, avec un message d'erreur.
 
 Dates (creation_date, update_date, version, detection_date) : datetime,
 timestamp Unix ou chaîne ISO, UTC si pas de fuseau (datetime.now() est
@@ -47,6 +51,7 @@ Un seul envoi à la fois (deux envois concurrents liraient le même max(id)).
 Dépendance : pip install clickhouse-connect
 """
 import json
+import sys
 from datetime import datetime, timezone
 
 import clickhouse_connect
@@ -65,6 +70,8 @@ NODE_TABLES = {
     "phone":             "id_phone",
     "social_id":         "id_social_id",
 }
+# table source : uuid → id_source
+SOURCE_TABLE, SOURCE_ID, SOURCE_UUID = "source", "id_source", "uuid"
 RANKED = {"fqdn", "ip"}
 NEW_RANK = 1000001
 CHUNK = 1000  # nombre de valeurs par requête de résolution
@@ -86,6 +93,27 @@ def to_ts(v, default: int) -> int:
             v = v.replace(tzinfo=timezone.utc)
         return int(v.timestamp())
     return default
+
+
+def norm_uuid(v) -> str:
+    return str(v or "").strip().lower()
+
+
+def resolve_sources(client, uuids: set[str]) -> dict:
+    """{uuid} → {uuid: id_source}, pour les uuid présents dans la table
+    source (le plus petit id s'il y en a plusieurs). Les uuid inconnus sont
+    absents du résultat."""
+    ids = {}
+    uuids = sorted(u for u in uuids if u)
+    for i in range(0, len(uuids), CHUNK):
+        # toString + lower : marche que la colonne soit UUID ou String
+        res = client.query(
+            f"SELECT lower(toString({SOURCE_UUID})) AS u, min({SOURCE_ID}) "
+            f"FROM {SOURCE_TABLE} WHERE u IN {{vals:Array(String)}} GROUP BY u",
+            parameters={"vals": uuids[i:i + CHUNK]})
+        for u, id_ in res.result_rows:
+            ids[u] = id_
+    return ids
 
 
 def resolve_ids(client, nodes: set[tuple[str, str]], now: int) -> dict:
@@ -127,32 +155,51 @@ def send(links: list[dict] = (), properties: list[dict] = ()) -> None:
                                            username=USER, password=PASSWORD)
     now = int(datetime.now(timezone.utc).timestamp())
 
+    # 0. source_uuid → id_source ; uuid absent ou inconnu → ligne ignorée
+    sources = resolve_sources(client, {norm_uuid(r.get("source_uuid"))
+                                       for r in (*links, *properties)})
+
+    def source_id(row, kind: str, n: int, desc: str):
+        uuid = norm_uuid(row.get("source_uuid"))
+        if uuid not in sources:
+            print(f"ERREUR {kind} n°{n} ({desc}) : source_uuid "
+                  f"{uuid + ' inconnu' if uuid else 'absent'}, ligne ignorée",
+                  file=sys.stderr)
+            return None
+        return sources[uuid]
+
     # 1. nettoyage des liens
     link_rows = []
-    for l in links:
+    for n, l in enumerate(links, 1):
         t1, t2 = str(l["type_1"]).lower(), str(l["type_2"]).lower()
         v1, v2 = str(l["value_1"]), str(l["value_2"])
         if t1 not in NODE_TABLES or t2 not in NODE_TABLES or not v1 or not v2:
             continue
         if t1 == t2 and v1 == v2:
             continue
+        src = source_id(l, "lien", n, f"{t1} {v1} → {t2} {v2}")
+        if src is None:
+            continue
         ver = to_ts(l.get("update_date"), now)
         det = to_ts(l.get("creation_date"), ver)
-        link_rows.append((t1, v1, t2, v2, int(l.get("id_source") or 0), det, ver))
+        link_rows.append((t1, v1, t2, v2, src, det, ver))
 
     # 2. nettoyage des propriétés ; un seul (type, valeur, source) : dernier
     # payload, version max, detection_date min (comme la fusion de property)
     prop_rows = {}  # (type, valeur, source) → [payload, det, ver]
-    for p in properties:
+    for n, p in enumerate(properties, 1):
         typ, value = str(p["type"]).lower(), str(p["value"])
         payload = p.get("payload")
         if typ not in NODE_TABLES or not value or payload is None:
+            continue
+        src = source_id(p, "propriété", n, f"{typ} {value}")
+        if src is None:
             continue
         if not isinstance(payload, str):
             payload = json.dumps(payload, ensure_ascii=False)
         ver = to_ts(p.get("version"), now)
         det = min(to_ts(p.get("detection_date"), ver), INT32_MAX)
-        key = (typ, value, int(p.get("id_source") or 0))
+        key = (typ, value, src)
         if key in prop_rows:
             _, det0, ver0 = prop_rows[key]
             det, ver = min(det, det0), max(ver, ver0)
@@ -190,11 +237,13 @@ if __name__ == "__main__":
     send(
         links=[
             {"value_1": "example.com", "value_2": "93.184.216.34",
-             "type_1": "fqdn", "type_2": "ip", "id_source": 1,
+             "type_1": "fqdn", "type_2": "ip",
+             "source_uuid": "00000000-0000-0000-0000-000000000001",
              "update_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
         ],
         properties=[
-            {"value": "example.com", "type": "fqdn", "id_source": 1,
+            {"value": "example.com", "type": "fqdn",
+             "source_uuid": "00000000-0000-0000-0000-000000000001",
              "payload": {"registrar": "IANA", "country": "US"},
              "version": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
         ],

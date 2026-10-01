@@ -77,7 +77,8 @@ def send_links(links: list[dict]) -> None:
         det = to_ts(l.get("creation_date"), ver)
         rows.append((t1, v1, t2, v2, int(l.get("id_source") or 0), det, ver))
 
-    # 2. valeur → id, par type (nouvel id si la valeur est inconnue)
+    # 2. valeur → id, par type (le plus ancien si la valeur en a plusieurs,
+    # nouvel id si elle est inconnue)
     ids = {}  # (type, valeur) → id
     for typ, idcol in NODE_TABLES.items():
         values = sorted({v1 for t1, v1, *_ in rows if t1 == typ}
@@ -86,7 +87,7 @@ def send_links(links: list[dict]) -> None:
             continue
         for i in range(0, len(values), CHUNK):
             res = client.query(
-                f"SELECT value, argMax({idcol}, version) FROM {typ} "
+                f"SELECT value, min({idcol}) FROM {typ} "
                 "WHERE value IN {vals:Array(String)} GROUP BY value",
                 parameters={"vals": values[i:i + CHUNK]},
                 # l'index primaire suffit (égalité) : inutile de charger les

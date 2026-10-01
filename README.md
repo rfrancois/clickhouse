@@ -9,9 +9,9 @@ Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 - **Schéma de production** : une table de valeurs par type de nœud
   (`fqdn`, `ip`, `application`, `plugin`, ...) / `link`
   (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, liens
-  dupliqués dans les deux sens ; `ReplacingMergeTree(version)` pour les
-  tables de valeurs et `property`, `AggregatingMergeTree` pour `link` et
-  `property_detection`).
+  dupliqués dans les deux sens ; `AggregatingMergeTree` pour les tables
+  de valeurs (une ligne par valeur), `link` et `property_detection`,
+  `ReplacingMergeTree(version)` pour `property`).
 
 ## Commandes
 
@@ -29,6 +29,10 @@ make migration    # base existante : copie link → link_new (AggregatingMergeTr
                   # et property.detection_date → property_detection
 make migration-swap  # bascule link ↔ link_new (ancienne : link_old_replacing)
                      # et supprime property.detection_date
+make migration-nodes  # base existante : copie les 9 tables de valeurs → <type>_new
+                      # (AggregatingMergeTree, une ligne par valeur) ;
+                      # ids écartés listés dans node_id_remap
+make migration-nodes-swap  # bascule <type> ↔ <type>_new (anciennes : <type>_old_replacing)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -61,7 +65,8 @@ Choix d'import :
 - aucun id n'est calculé à partir d'une valeur : `node.csv` garde ses
   propres ids ; toute autre valeur fqdn/ip (`domains.json`, extrémités de
   liens) est d'abord cherchée dans la table de son type et reprend
-  l'id existant ; si elle est absente, elle reçoit un **nouvel id
+  l'id existant (le plus ancien, `min(id)`, si elle en a plusieurs) ; si
+  elle est absente, elle reçoit un **nouvel id
   auto-incrémenté** à partir du `max(id)` du type déjà en base
   (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = 1000000`
   pour `fqdn` / `ip`).
@@ -102,9 +107,10 @@ Choix d'import :
   `detection_date` → `property_detection` (pas `property`), vide ou à la
   date zéro MySQL (`0000-00-00 00:00:00`) → date de `version` ;
 - la déduplication est assurée par le moteur de chaque table
-  (asynchrone) : `ReplacingMergeTree(version)` pour les tables de valeurs
-  et `property` (dernière version gagnante), `AggregatingMergeTree` pour
-  `link` et `property_detection` (première date de détection conservée) ;
+  (asynchrone) : `ReplacingMergeTree(version)` pour `property` (dernière
+  version gagnante), `AggregatingMergeTree` pour les tables de valeurs
+  (une ligne par valeur, id le plus ancien, voir plus bas), `link` et
+  `property_detection` (première date de détection conservée) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).
 
 Ré-import idempotent : on peut relancer `make import` sur un fichier déjà
@@ -129,12 +135,31 @@ SELECT * FROM fqdn WHERE value LIKE '%google.com%' ORDER BY rank;
 ```
 
 `fqdn` est triée par **nom de domaine inversé**
-(`ORDER BY (reverse(value), id_fqdn)`) : tous les `*.google.com`,
+(`ORDER BY reverse(value)`) : tous les `*.google.com`,
 `google.com.br`… sont stockés côte à côte, donc l'index ngram ne garde que
 quelques blocs et `ORDER BY rank` — avec ou sans `LIMIT` — ne trie que les
 lignes trouvées. Triée par `id_fqdn`, ces lignes seraient éparpillées
 (~1 par bloc) et chaque recherche triée relirait presque toute la table.
 La recherche par id (jointures) passe par la projection légère `p_id`.
+
+**Une ligne par valeur** (toutes les tables de valeurs : `fqdn`, `ip` et
+les autres types) : la clé est la valeur seule, en `AggregatingMergeTree`.
+Une valeur ré-insérée sous un autre id (ex. `node.csv` qui fournit ses
+propres ids) fusionne avec la ligne existante, colonne par colonne :
+- `id_<type>` : `min` — l'id le plus **ancien** est gardé (ids
+  auto-incrémentés) ;
+- `rank` (`fqdn` et `ip`) : `anyLast` — le rank du **dernier insert**
+  (ordre d'insertion, pas `version`) ;
+- `version` : `max` — la plus récente date de mise à jour.
+
+Lecture dédupliquée avant fusion : `FINAL`, ou `GROUP BY value` avec
+`min(id_<type>)` / `max(version)`. Les liens ou propriétés qui citent un id
+écarté deviennent orphelins après la fusion : l'import résout donc toujours
+une valeur vers `min(id)`. Migration d'une base existante :
+`make migration-nodes` puis `make migration-nodes-swap`
+(`sql/08_migrate_nodes_copy.sql`, `sql/09_migrate_nodes_swap.sql`) ; les
+ids écartés par la migration sont listés dans `node_id_remap`
+(`node_type, id_ecarte → id_garde`).
 
 ### Index texte exact
 
@@ -156,7 +181,7 @@ Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
 Même principe (projection `p_id`, rank 0 → 1 000 000), avec deux
 différences :
-- triée par valeur dans l'ordre **normal** (`ORDER BY (value, id_ip)`) : pour
+- triée par valeur dans l'ordre **normal** (`ORDER BY value`) : pour
   une IP, c'est le préfixe qui regroupe (sous-réseau), donc
   `LIKE '192.168.%'` passe par la clé primaire ;
 - **aucun index ngram/texte** : une IP n'a que des chiffres et des points,

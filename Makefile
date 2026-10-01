@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap upgrade generate test import pdf down clean
+.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -26,6 +26,17 @@ migration:
 # contrôle des comptes.
 migration-swap:
 	$(CLIENT) < sql/07_migrate_link_swap.sql
+
+# Base existante : les 9 tables de valeurs (fqdn, ip, application, ...) →
+# AggregatingMergeTree, une ligne par valeur (id le plus ancien conservé).
+# Copies dans <type>_new, tables intactes ; relançable.
+migration-nodes:
+	$(CLIENT) < sql/08_migrate_nodes_copy.sql
+
+# Bascule vers les <type>_new (anciennes gardées sous <type>_old_replacing),
+# après contrôle des comptes.
+migration-nodes-swap:
+	$(CLIENT) < sql/09_migrate_nodes_swap.sql
 
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:

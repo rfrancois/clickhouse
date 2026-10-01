@@ -20,9 +20,13 @@ DROP TABLE IF EXISTS property_detection;
 CREATE TABLE fqdn
 (
     value    String,
-    id_fqdn  Int64,
-    rank     Int32,
-    version  UInt64,
+    -- une ligne par nom, fusion colonne par colonne (AggregatingMergeTree) :
+    -- un nom ré-inséré avec un autre id garde son id le plus ANCIEN (ids
+    -- auto-incrémentés → min), le rank du DERNIER insert (anyLast, ordre
+    -- d'insertion, pas version) et la plus récente version (max)
+    id_fqdn  SimpleAggregateFunction(min, Int64),
+    rank     SimpleAggregateFunction(anyLast, Int32),
+    version  SimpleAggregateFunction(max, UInt64),
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
     -- index texte EXACT pour LIKE '%…%' : lit ~5x moins de blocs que le ngram
     -- (probabiliste). Le ngram est gardé tant que les imports avec l'index
@@ -32,35 +36,37 @@ CREATE TABLE fqdn
     -- (positions des lignes seulement), triée par id_fqdn
     PROJECTION p_id (SELECT _part_offset ORDER BY id_fqdn)
 )
-ENGINE = ReplacingMergeTree(version)
+ENGINE = AggregatingMergeTree
 -- tri par nom INVERSÉ : tous les *.google.com, google.com.br... sont côte à
 -- côte, donc LIKE '%google.com%' ne lit que quelques blocs, et ORDER BY rank
--- (même sans LIMIT) ne trie que ces lignes. Même identité de ligne
--- (id_fqdn, value) qu'avant : la déduplication est inchangée.
-ORDER BY (reverse(value), id_fqdn)
+-- (même sans LIMIT) ne trie que ces lignes. Identité de ligne = le nom seul
+-- (plus id_fqdn) : deux ids pour un même nom fusionnent.
+ORDER BY reverse(value)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE ip
 (
     value    String,
-    id_ip    Int64,
-    rank     Int32,
-    version  UInt64,
+    -- une ligne par IP, même fusion que fqdn (id min, rank anyLast, version max)
+    id_ip    SimpleAggregateFunction(min, Int64),
+    rank     SimpleAggregateFunction(anyLast, Int32),
+    version  SimpleAggregateFunction(max, UInt64),
     -- pas d'index ngram/texte : une IP n'a que des chiffres et des points, les
     -- trigrammes sont partout, l'index ne filtre rien (testé, plus lent avec)
     -- recherche par id (jointure liens → IP) : projection légère
     PROJECTION p_id (SELECT _part_offset ORDER BY id_ip)
 )
-ENGINE = ReplacingMergeTree(version)
+ENGINE = AggregatingMergeTree
 -- tri par valeur (ordre normal) : un sous-réseau est contigu, donc
 -- LIKE '192.168.%' passe par la clé primaire
-ORDER BY (value, id_ip)
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 -- 1 bis) une table de valeurs par autre type de nœud (application, capture,
 --    plugin, organization_name, organization_id, phone, social_id).
 --    Même modèle que la table ip (value, id, version), SANS rank : ces types
 --    ne sont pas classés. Tri par valeur (résolution valeur → id à l'import),
+--    une ligne par valeur (id le plus ancien : min, version : max),
 --    projection légère par id (jointure liens → valeur). Nouveau type de
 --    nœud → nouvelle table <type> ici + NODE_TABLES dans
 --    scripts/import_data.py.
@@ -68,78 +74,78 @@ SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE application
 (
     value                String,
-    id_application       Int64,
-    version              UInt64,
+    id_application       SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_application)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_application)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE capture
 (
     value                String,
-    id_capture           Int64,
-    version              UInt64,
+    id_capture           SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_capture)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_capture)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE plugin
 (
     value                String,
-    id_plugin            Int64,
-    version              UInt64,
+    id_plugin            SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_plugin)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_plugin)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE organization_name
 (
     value                String,
-    id_organization_name Int64,
-    version              UInt64,
+    id_organization_name SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_organization_name)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_organization_name)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE organization_id
 (
     value                String,
-    id_organization_id   Int64,
-    version              UInt64,
+    id_organization_id   SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_organization_id)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_organization_id)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE phone
 (
     value                String,
-    id_phone             Int64,
-    version              UInt64,
+    id_phone             SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_phone)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_phone)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 CREATE TABLE social_id
 (
     value                String,
-    id_social_id         Int64,
-    version              UInt64,
+    id_social_id         SimpleAggregateFunction(min, Int64),
+    version              SimpleAggregateFunction(max, UInt64),
     PROJECTION p_id (SELECT _part_offset ORDER BY id_social_id)
 )
-ENGINE = ReplacingMergeTree(version)
-ORDER BY (value, id_social_id)
+ENGINE = AggregatingMergeTree
+ORDER BY value
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 
 -- 2) link : une seule table pour tous les couples de nœuds, TYPÉS.

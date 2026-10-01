@@ -256,7 +256,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     for t in ("stg_link", "stg_value"):
         log(f"  {t} : {int(query(f'SELECT count() FROM {t}')):,} lignes")
 
-    # 3a — table de correspondance (type, valeur) → id, restreinte aux valeurs
+    # 3a — table de correspondance (type, valeur) → id (le plus ancien si la
+    # valeur a plusieurs ids, comme la fusion de fqdn), restreinte aux valeurs
     # citées par les liens ou par domains.json, construite tranche par tranche.
     query("DROP TABLE IF EXISTS tmp_link_values")
     query("CREATE TABLE tmp_link_values (node_type String, value String) "
@@ -286,7 +287,7 @@ def distribute_links(n: int = LINK_SLICES) -> None:
         for typ, idcol in types:
             query(
                 f"INSERT INTO tmp_node_map SELECT '{typ}', value, "
-                f"argMax({idcol}, version) FROM {typ} "
+                f"min({idcol}) FROM {typ} "
                 "WHERE value IN (SELECT value FROM tmp_link_values "
                 f"WHERE node_type = '{typ}' AND cityHash64(value) % {n} = {k}) "
                 "GROUP BY value", mem=True)

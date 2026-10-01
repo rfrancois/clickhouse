@@ -14,10 +14,10 @@ Version autonome et simplifiée de distribute_links() / distribute_properties()
     1000000 pour fqdn / ip
 
 Liens : chaque lien est un dict avec les champs
-      value_1, value_2, type_1, type_2, source_uuid, creation_date, update_date
-  - creation_date et update_date sont optionnels : update_date absent → now ;
-    creation_date absent → update_date. link (AggregatingMergeTree) garde la
-    plus ANCIENNE creation_date et la plus RÉCENTE update_date d'un lien :
+      value_1, value_2, type_1, type_2, source_uuid, detection_date, update_date
+  - detection_date et update_date sont optionnels : update_date absent → now ;
+    detection_date absent → update_date. link (AggregatingMergeTree) garde la
+    plus ANCIENNE detection_date et la plus RÉCENTE update_date d'un lien :
     un lien déjà connu garde donc sa date de création.
   - chaque lien est inséré dans les deux sens (A→B et B→A)
   - ignorés : type inconnu, valeur vide, auto-lien (même type, même valeur)
@@ -40,7 +40,7 @@ Sources : source_uuid (liens et propriétés) est résolu en id_source dans la
 table source. Une ligne dont le source_uuid est absent ou inconnu est
 ignorée, avec un message d'erreur.
 
-Dates (creation_date, update_date, version, detection_date) : datetime,
+Dates (detection_date, update_date, version, detection_date) : datetime,
 timestamp Unix ou chaîne ISO, UTC si pas de fuseau (datetime.now() est
 l'heure LOCALE : utiliser datetime.now(timezone.utc)). Dates absentes : la
 même heure (now) pour tout l'envoi — liens et propriétés envoyés par deux
@@ -150,7 +150,7 @@ def resolve_ids(client, nodes: set[tuple[str, str]], now: int) -> dict:
     return ids
 
 
-def send(links: list[dict] = (), properties: list[dict] = ()) -> None:
+def send_to_clickhouse(links: list[dict] = (), properties: list[dict] = ()) -> None:
     client = clickhouse_connect.get_client(host=HOST, port=PORT,
                                            username=USER, password=PASSWORD)
     now = int(datetime.now(timezone.utc).timestamp())
@@ -180,8 +180,8 @@ def send(links: list[dict] = (), properties: list[dict] = ()) -> None:
         src = source_id(l, "lien", n, f"{t1} {v1} → {t2} {v2}")
         if src is None:
             continue
-        ver = to_ts(l.get("update_date"), now)
-        det = to_ts(l.get("creation_date"), ver)
+        ver = to_ts(l.get("version"), now)
+        det = to_ts(l.get("detection_date"), ver)
         link_rows.append((t1, v1, t2, v2, src, det, ver))
 
     # 2. nettoyage des propriétés ; un seul (type, valeur, source) : dernier
@@ -234,7 +234,7 @@ def send(links: list[dict] = (), properties: list[dict] = ()) -> None:
 
 
 if __name__ == "__main__":
-    send(
+    send_to_clickhouse(
         links=[
             {"value_1": "example.com", "value_2": "93.184.216.34",
              "type_1": "fqdn", "type_2": "ip",

@@ -22,13 +22,21 @@
 --   ALTER TABLE property MODIFY COLUMN detection_date
 --       SimpleAggregateFunction(min, DateTime) SETTINGS mutations_sync = 2;
 
--- garde-fous : property pas encore migrée, ou colonne déjà en Int32 → arrêt
+-- type actuel, affiché avant les garde-fous
+SELECT name, type AS type_avant FROM system.columns
+WHERE database = currentDatabase() AND table = 'property' AND name = 'detection_date'
+FORMAT PrettyCompactMonoBlock;
+
+-- garde-fous : property pas encore migrée, ou type inattendu → arrêt.
+-- Accepté : DateTime avec ou sans fuseau (DateTime('Europe/Paris') : le
+-- timestamp Unix ne dépend pas du fuseau), ou déjà Int32 (l'ALTER vers le
+-- même type ne fait rien : relançable).
 SELECT throwIf(engine != 'AggregatingMergeTree',
                'property n''est pas en AggregatingMergeTree : lancer make migration-property puis make migration-property-swap (déjà en Int32)')
 FROM system.tables WHERE database = currentDatabase() AND name = 'property'
 FORMAT Null;
-SELECT throwIf(type != 'SimpleAggregateFunction(min, DateTime)',
-               'property.detection_date n''est pas en SimpleAggregateFunction(min, DateTime) : rien à faire')
+SELECT throwIf(NOT match(type, '^SimpleAggregateFunction\\(min, (DateTime(\\(.*\\))?|Int32)\\)$'),
+               'property.detection_date : type inattendu (cf. type_avant ci-dessus), ni DateTime ni Int32')
 FROM system.columns
 WHERE database = currentDatabase() AND table = 'property' AND name = 'detection_date'
 FORMAT Null;
@@ -36,6 +44,6 @@ FORMAT Null;
 ALTER TABLE property MODIFY COLUMN detection_date SimpleAggregateFunction(min, Int32)
 SETTINGS mutations_sync = 2;
 
-SELECT name, type FROM system.columns
+SELECT name, type AS type_apres FROM system.columns
 WHERE database = currentDatabase() AND table = 'property' AND name = 'detection_date'
 FORMAT PrettyCompactMonoBlock;

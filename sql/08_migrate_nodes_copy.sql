@@ -25,9 +25,8 @@
 --
 -- ATTENTION : une valeur présente sous plusieurs ids ne garde que le plus
 -- ancien ; les liens (link) et propriétés (property) qui citent les autres
--- ids deviennent orphelins. Ces ids sont listés dans node_id_remap
--- (type, id écarté → id gardé) et le contrôle en fin de fichier compte les
--- orphelins.
+-- ids deviennent orphelins. Les anciennes tables (<type>_old_replacing après
+-- la bascule) permettent de retrouver ces ids tant qu'elles existent.
 
 -- garde-fou : base déjà migrée (même en partie) → arrêt (rien n'est créé)
 SELECT throwIf(count() > 0,
@@ -178,66 +177,6 @@ SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 INSERT INTO social_id_new (value, id_social_id, version)
 SELECT value, min(id_social_id), max(version) FROM social_id GROUP BY value;
 
--- ---------- ids écartés → id gardé ----------
--- Petite table (seulement les valeurs à plusieurs ids), conservée après la
--- bascule pour réécrire plus tard les liens / propriétés qui citent un id
--- écarté. (node_type, id) identifie un nœud, comme dans link / property.
-CREATE TABLE IF NOT EXISTS node_id_remap
-(
-    node_type  Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
-                     'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
-                     'phone' = 8, 'social_id' = 9),
-    id_ecarte  Int64,
-    id_garde   Int64
-)
-ENGINE = ReplacingMergeTree
-ORDER BY (node_type, id_ecarte);
-
-INSERT INTO node_id_remap
-SELECT 'fqdn', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_fqdn) AS ids, min(id_fqdn) AS id_garde
-      FROM fqdn GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'ip', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_ip) AS ids, min(id_ip) AS id_garde
-      FROM ip GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'application', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_application) AS ids, min(id_application) AS id_garde
-      FROM application GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'capture', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_capture) AS ids, min(id_capture) AS id_garde
-      FROM capture GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'plugin', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_plugin) AS ids, min(id_plugin) AS id_garde
-      FROM plugin GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'organization_name', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_organization_name) AS ids, min(id_organization_name) AS id_garde
-      FROM organization_name GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'organization_id', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_organization_id) AS ids, min(id_organization_id) AS id_garde
-      FROM organization_id GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'phone', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_phone) AS ids, min(id_phone) AS id_garde
-      FROM phone GROUP BY value HAVING length(ids) > 1);
-
-INSERT INTO node_id_remap
-SELECT 'social_id', arrayJoin(arrayFilter(i -> i != id_garde, ids)), id_garde
-FROM (SELECT groupUniqArray(id_social_id) AS ids, min(id_social_id) AS id_garde
-      FROM social_id GROUP BY value HAVING length(ids) > 1);
-
 -- ---------- contrôle ----------
 -- lignes_new doit valoir le nombre de valeurs distinctes de l'ancienne table
 -- (noms_approx, approché ; le double après une relance, avant fusion)
@@ -250,22 +189,6 @@ UNION ALL SELECT 'organization_name', count(), uniq(value), (SELECT count() FROM
 UNION ALL SELECT 'organization_id', count(), uniq(value), (SELECT count() FROM organization_id_new) FROM organization_id
 UNION ALL SELECT 'phone', count(), uniq(value), (SELECT count() FROM phone_new) FROM phone
 UNION ALL SELECT 'social_id', count(), uniq(value), (SELECT count() FROM social_id_new) FROM social_id
-FORMAT PrettyCompactMonoBlock;
-
--- ids écartés par type, et liens / propriétés qui deviendront orphelins
--- après la bascule (aucune ligne : aucun id écarté)
-SELECT node_type, ids_ecartes,
-       ifNull(liens_orphelins, 0) AS liens_orphelins,
-       ifNull(proprietes_orphelines, 0) AS proprietes_orphelines
-FROM (SELECT node_type, count() AS ids_ecartes FROM node_id_remap FINAL GROUP BY node_type) AS r
-LEFT JOIN (SELECT type_1 AS node_type, count() AS liens_orphelins FROM link
-           WHERE (type_1, id_1) IN (SELECT node_type, id_ecarte FROM node_id_remap)
-           GROUP BY type_1) AS l USING (node_type)
-LEFT JOIN (SELECT node_type, count() AS proprietes_orphelines FROM property
-           WHERE (node_type, id_node) IN (SELECT node_type, id_ecarte FROM node_id_remap)
-           GROUP BY node_type) AS p USING (node_type)
-ORDER BY node_type
-SETTINGS join_use_nulls = 1
 FORMAT PrettyCompactMonoBlock;
 
 SELECT table, formatReadableSize(sum(bytes_on_disk)) AS disque

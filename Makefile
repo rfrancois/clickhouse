@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap upgrade generate test import pdf down clean
+.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -37,6 +37,23 @@ migration-nodes:
 # après contrôle des comptes.
 migration-nodes-swap:
 	$(CLIENT) < sql/09_migrate_nodes_swap.sql
+
+# Base existante (après migration / migration-swap) : property +
+# property_detection → une seule property en AggregatingMergeTree (payload du
+# dernier insert, première date de détection). Copie dans property_new ;
+# relançable.
+migration-property:
+	$(CLIENT) < sql/10_migrate_property_copy.sql
+
+# Bascule vers property_new (anciennes gardées sous property_old_replacing et
+# property_detection_old), après contrôle des comptes.
+migration-property-swap:
+	$(CLIENT) < sql/11_migrate_property_swap.sql
+
+# Base dont property est déjà en AggregatingMergeTree avec detection_date en
+# DateTime : passage en Int32 (timestamp Unix), en place (ALTER).
+migration-property-int:
+	$(CLIENT) < sql/12_migrate_property_detection_int.sql
 
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:

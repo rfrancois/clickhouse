@@ -9,9 +9,8 @@ Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 - **Schéma de production** : une table de valeurs par type de nœud
   (`fqdn`, `ip`, `application`, `plugin`, ...) / `link`
   (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, liens
-  dupliqués dans les deux sens ; `AggregatingMergeTree` pour les tables
-  de valeurs (une ligne par valeur), `link` et `property_detection`,
-  `ReplacingMergeTree(version)` pour `property`).
+  dupliqués dans les deux sens ; `AggregatingMergeTree` partout : tables
+  de valeurs (une ligne par valeur), `link` et `property`).
 
 ## Commandes
 
@@ -30,9 +29,14 @@ make migration    # base existante : copie link → link_new (AggregatingMergeTr
 make migration-swap  # bascule link ↔ link_new (ancienne : link_old_replacing)
                      # et supprime property.detection_date
 make migration-nodes  # base existante : copie les 9 tables de valeurs → <type>_new
-                      # (AggregatingMergeTree, une ligne par valeur) ;
-                      # ids écartés listés dans node_id_remap
+                      # (AggregatingMergeTree, une ligne par valeur)
 make migration-nodes-swap  # bascule <type> ↔ <type>_new (anciennes : <type>_old_replacing)
+make migration-property  # après migration-swap : property + property_detection
+                         # → property_new (AggregatingMergeTree)
+make migration-property-swap  # bascule property ↔ property_new (anciennes :
+                              # property_old_replacing, property_detection_old)
+make migration-property-int  # property déjà migrée : detection_date DateTime
+                             # → Int32 (timestamp Unix), en place
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -50,7 +54,7 @@ Fichiers reconnus (classification par nom) :
 |---|---|---|
 | `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | table du `type` (`fqdn`, `ip`, `application`, ...) |
 | `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
-| `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` (+ `detection_date` → `property_detection`) |
+| `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` (ip, et cn / dns qui sont des IP) |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
@@ -104,13 +108,13 @@ Choix d'import :
   export MySQL), ce que le format CSV de ClickHouse ne lit pas : le fichier
   est chargé en `CustomSeparatedWithNames` avec la règle d'échappement
   `JSON` (fins de ligne `\r\n` acceptées). `version` → timestamp Unix ;
-  `detection_date` → `property_detection` (pas `property`), vide ou à la
-  date zéro MySQL (`0000-00-00 00:00:00`) → date de `version` ;
+  `detection_date` vide ou à la date zéro MySQL (`0000-00-00 00:00:00`)
+  → date de `version` ;
 - la déduplication est assurée par le moteur de chaque table
-  (asynchrone) : `ReplacingMergeTree(version)` pour `property` (dernière
-  version gagnante), `AggregatingMergeTree` pour les tables de valeurs
-  (une ligne par valeur, id le plus ancien, voir plus bas), `link` et
-  `property_detection` (première date de détection conservée) ;
+  (asynchrone), `AggregatingMergeTree` partout, fusion colonne par
+  colonne : tables de valeurs (une ligne par valeur, id le plus ancien,
+  voir plus bas), `link` et `property` (première date de détection
+  conservée ; pour `property`, payload du dernier insert) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).
 
 Ré-import idempotent : on peut relancer `make import` sur un fichier déjà
@@ -157,9 +161,7 @@ Lecture dédupliquée avant fusion : `FINAL`, ou `GROUP BY value` avec
 écarté deviennent orphelins après la fusion : l'import résout donc toujours
 une valeur vers `min(id)`. Migration d'une base existante :
 `make migration-nodes` puis `make migration-nodes-swap`
-(`sql/08_migrate_nodes_copy.sql`, `sql/09_migrate_nodes_swap.sql`) ; les
-ids écartés par la migration sont listés dans `node_id_remap`
-(`node_type, id_ecarte → id_garde`).
+(`sql/08_migrate_nodes_copy.sql`, `sql/09_migrate_nodes_swap.sql`).
 
 ### Index texte exact
 
@@ -229,29 +231,35 @@ type de chaque extrémité :
 ### Table `property` (informations par nœud et par source)
 
 Une ligne par `(node_type, id_node, id_source)` : `payload` (JSON
-stocké en `String` compressé ZSTD, renvoyé tel quel), `version`.
-`ReplacingMergeTree(version)` : une nouvelle détection d'une même
-source remplace l'ancienne (pas d'historique). `node_type` utilise le même
-`Enum8` que `link` : `(node_type, id_node)` identifie un nœud.
-Projection légère `p_source` pour « tout ce qu'a produit la source X ».
+stocké en `String` compressé ZSTD, renvoyé tel quel), `version`,
+`detection_date`. `AggregatingMergeTree`, fusion **colonne par colonne**
+quand une même source re-détecte le nœud :
+- `payload` : `anyLast` — celui du **dernier insert** (ordre d'insertion,
+  pas `version` ; pas d'historique) ;
+- `version` : `max` — la plus récente date de mise à jour ;
+- `detection_date` : `min` — la **première** date de détection, jamais
+  écrasée par une nouvelle détection. Timestamp Unix en `Int32`
+  (secondes, dates jusqu'au 2038-01-19) ; `toDateTime(detection_date)`
+  pour l'afficher.
 
-### Table `property_detection` (date de première détection)
-
-Une ligne par `(node_type, id_node, id_source)`, même clé que `property` :
-`detection_date` seule, en `AggregatingMergeTree` avec `min`. Elle est à
-part parce que `property` garde la ligne entière de la dernière version et
-écraserait cette date à chaque nouvelle détection ; ici une nouvelle
-détection ne remplace jamais une date plus ancienne, quel que soit l'ordre
-d'insertion. Remplie par `make import` (colonne `detection_date` de
-`properties.csv`).
+`node_type` utilise le même `Enum8` que `link` : `(node_type, id_node)`
+identifie un nœud. Projection légère `p_source` pour « tout ce qu'a produit
+la source X ». Pas d'`UPDATE` léger sur `AggregatingMergeTree` : pour
+modifier un payload, ré-insérer la ligne.
 
 ```sql
-SELECT p.id_source, p.payload, p.version, d.detection_date
-FROM property AS p FINAL
-LEFT JOIN (SELECT id_source, detection_date FROM property_detection FINAL
-           WHERE node_type = 'fqdn' AND id_node = 123456) AS d USING (id_source)
-WHERE p.node_type = 'fqdn' AND p.id_node = 123456;
+SELECT id_source, payload, version, toDateTime(detection_date) AS detection_date
+FROM property FINAL
+WHERE node_type = 'fqdn' AND id_node = 123456;
 ```
+
+Ancien schéma (`property` en `ReplacingMergeTree` + `property_detection`
+à part) : `make migration-property` puis `make migration-property-swap`
+(`sql/10_migrate_property_copy.sql`, `sql/11_migrate_property_swap.sql`),
+qui donnent directement `detection_date` en `Int32`. `property` déjà en
+`AggregatingMergeTree` avec `detection_date` en `DateTime` :
+`make migration-property-int` (`sql/12_migrate_property_detection_int.sql`,
+`ALTER` en place).
 
 ## Résultats historiques (dans `results/`)
 

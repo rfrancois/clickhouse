@@ -52,7 +52,7 @@ CREATE TABLE stg_property
     id_source      String,
     payload        String,
     version        String,
-    detection_date String  -- → property_detection (pas property)
+    detection_date String  -- → property.detection_date (min : la plus ancienne)
 )
 ENGINE = MergeTree
 ORDER BY tuple();

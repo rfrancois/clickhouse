@@ -162,9 +162,9 @@ def distribute_properties() -> None:
     de l'Enum8) ou un id_node non numérique : ligne ignorée (et comptée).
 
     version (date de mise à jour) → timestamp Unix, now() si illisible.
-    detection_date → property_detection (AggregatingMergeTree, garde la plus
-    ancienne), pas dans property ; illisible (dont la date zéro MySQL
-    0000-00-00) → date de version."""
+    detection_date → timestamp Unix Int32 (property la fusionne en gardant
+    la plus ancienne) ; illisible (dont la date zéro MySQL 0000-00-00) →
+    date de version."""
     counts = query("SELECT lower(node_type), toInt64OrZero(id_node) != 0, count() "
                    "FROM stg_property GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV")
     if not counts:
@@ -182,19 +182,15 @@ def distribute_properties() -> None:
     def date(col: str) -> str:
         return (f"if(startsWith({col}, '0000-00-00'), NULL, "
                 f"parseDateTimeBestEffortOrNull({col}))")
-    where = (f"FROM stg_property WHERE lower(node_type) IN ({TYPES_SQL}) "
-             "AND toInt64OrZero(id_node) != 0")
     query(
-        "INSERT INTO property (node_type, id_node, id_source, payload, version) "
+        "INSERT INTO property "
+        "(node_type, id_node, id_source, payload, version, detection_date) "
         "SELECT lower(node_type), toInt64OrZero(id_node), toInt32OrZero(id_source), "
         "payload, "
-        f"coalesce(toUnixTimestamp({date('version')}), toUnixTimestamp(now())) "
-        + where, mem=True)
-    query(
-        "INSERT INTO property_detection (node_type, id_node, id_source, detection_date) "
-        "SELECT lower(node_type), toInt64OrZero(id_node), toInt32OrZero(id_source), "
-        f"coalesce({date('detection_date')}, {date('version')}, now()) "
-        + where, mem=True)
+        f"coalesce(toUnixTimestamp({date('version')}), toUnixTimestamp(now())), "
+        f"toInt32(coalesce({date('detection_date')}, {date('version')}, now())) "
+        f"FROM stg_property WHERE lower(node_type) IN ({TYPES_SQL}) "
+        "AND toInt64OrZero(id_node) != 0", mem=True)
     for line in counts.splitlines():
         typ, valid, cnt = line.split("\t")
         if typ in NODE_TABLES and valid == "1":
@@ -485,9 +481,17 @@ def main() -> None:
         log("Tables optimisées absentes → création du schéma "
             "(sql/02_optimized.sql)...")
         run_sql_file(ROOT / "sql" / "02_optimized.sql")
-    elif query("EXISTS TABLE property_detection") != "1":
-        sys.exit("Schéma antérieur à property_detection : lancer d'abord "
-                 "make migration puis make migration-swap.")
+    elif query("SELECT engine FROM system.tables WHERE database = "
+               "currentDatabase() AND name = 'property'") != "AggregatingMergeTree":
+        sys.exit("Schéma antérieur à property en AggregatingMergeTree : lancer "
+                 "d'abord make migration-property puis make migration-property-swap "
+                 "(précédés de make migration / migration-swap si "
+                 "property_detection n'existe pas encore).")
+    elif "Int32" not in query("SELECT type FROM system.columns WHERE database = "
+                              "currentDatabase() AND table = 'property' "
+                              "AND name = 'detection_date'"):
+        sys.exit("property.detection_date encore en DateTime : lancer d'abord "
+                 "make migration-property-int.")
 
     files, tmp = collect_files(src)
     try:

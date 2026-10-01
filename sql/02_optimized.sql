@@ -203,36 +203,21 @@ CREATE TABLE property
     -- même id que fqdn.id_fqdn / ip.id_ip / link.id_1|id_2
     id_node        Int64,
     id_source      Int32,
+    -- une ligne par (nœud, source), fusion colonne par colonne
+    -- (AggregatingMergeTree) : une nouvelle détection d'une même source
+    -- donne le payload du DERNIER insert (anyLast, ordre d'insertion, pas
+    -- version), la plus récente version (max) et la PREMIÈRE date de
+    -- détection (min)
     -- renvoyé tel quel, jamais filtré : String compressé plutôt que JSON typé
-    payload        String CODEC(ZSTD(3)),
-    version        UInt64,
+    payload        SimpleAggregateFunction(anyLast, String) CODEC(ZSTD(3)),
+    version        SimpleAggregateFunction(max, UInt64),
+    -- timestamp Unix (secondes) ; Int32 : jusqu'au 2038-01-19
+    detection_date SimpleAggregateFunction(min, Int32),
     -- « tout ce qu'a produit la source X » : projection légère (positions
     -- des lignes seulement, le payload n'est pas dupliqué)
     PROJECTION p_source (SELECT _part_offset ORDER BY (id_source, node_type))
 )
-ENGINE = ReplacingMergeTree(version)
-PARTITION BY node_type
--- une ligne par (nœud, source) : une nouvelle détection d'une même source
--- remplace l'ancienne (dernière version), pas d'historique
-ORDER BY (node_type, id_node, id_source)
-SETTINGS deduplicate_merge_projection_mode = 'rebuild';
-
--- 4) property_detection : date de PREMIÈRE détection de chaque propriété,
---    à part de property. property garde la ligne entière de la dernière
---    version (ReplacingMergeTree) et écraserait cette date à chaque nouvelle
---    détection ; ici AggregatingMergeTree + min : une nouvelle détection
---    d'une même source ne remplace jamais une date plus ancienne, quel que
---    soit l'ordre d'insertion. Même clé que property.
---    Lecture dédupliquée : FINAL, ou GROUP BY avec min(detection_date).
-CREATE TABLE property_detection
-(
-    node_type      Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
-                         'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
-                         'phone' = 8, 'social_id' = 9),
-    id_node        Int64,
-    id_source      Int32,
-    detection_date SimpleAggregateFunction(min, DateTime)
-)
 ENGINE = AggregatingMergeTree
 PARTITION BY node_type
-ORDER BY (node_type, id_node, id_source);
+ORDER BY (node_type, id_node, id_source)
+SETTINGS deduplicate_merge_projection_mode = 'rebuild';

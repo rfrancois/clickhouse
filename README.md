@@ -37,6 +37,8 @@ make migration-property-swap  # bascule property ↔ property_new (anciennes :
                               # property_old_replacing, property_detection_old)
 make migration-property-int  # property déjà migrée : detection_date DateTime
                              # → Int32 (timestamp Unix), en place
+make migration-link-int  # link.detection_date UInt64 → Int32 (comme property),
+                         # en place
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -217,7 +219,9 @@ type de chaque extrémité :
   ancienne `detection_date` (`min`, date de création, jamais écrasée par un
   ré-envoi) et la plus récente `version` (`max`, date de mise à jour), quel
   que soit l'ordre d'insertion. Lecture dédupliquée : `FINAL`, ou
-  `GROUP BY` avec `min(detection_date)` / `max(version)` ;
+  `GROUP BY` avec `min(detection_date)` / `max(version)`.
+  `detection_date` : timestamp Unix en `Int32`, comme dans `property`
+  (`make migration-link-int` pour une base où elle est encore en `UInt64`) ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
   les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.

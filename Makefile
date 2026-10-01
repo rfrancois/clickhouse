@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int upgrade generate test import pdf down clean
+.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -54,6 +54,11 @@ migration-property-swap:
 # DateTime : passage en Int32 (timestamp Unix), en place (ALTER).
 migration-property-int:
 	$(CLIENT) < sql/12_migrate_property_detection_int.sql
+
+# Base dont link.detection_date est en UInt64 : passage en Int32 (comme
+# property), en place (ALTER).
+migration-link-int:
+	$(CLIENT) < sql/13_migrate_link_detection_int.sql
 
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:

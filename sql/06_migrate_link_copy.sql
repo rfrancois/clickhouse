@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS link_new
                          'phone' = 8, 'social_id' = 9),
     id_2           Int64,
     id_source      Int32,
-    detection_date SimpleAggregateFunction(min, UInt64),
+    detection_date SimpleAggregateFunction(min, Int32),  -- comme 02_optimized.sql
     version        SimpleAggregateFunction(max, UInt64)
 )
 ENGINE = AggregatingMergeTree
@@ -45,7 +45,7 @@ ORDER BY (type_1, id_1, type_2, id_2, id_source);
 -- Copie en streaming (pas d'agrégation à l'insertion : mémoire bornée par
 -- la taille des blocs, pas par la taille de la table)
 INSERT INTO link_new
-SELECT type_1, id_1, type_2, id_2, id_source, detection_date, version FROM link
+SELECT type_1, id_1, type_2, id_2, id_source, toInt32(detection_date), version FROM link
 SETTINGS max_threads = 8, max_insert_threads = 4;
 
 -- property.detection_date → property_detection (min : les doublons de

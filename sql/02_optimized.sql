@@ -176,7 +176,9 @@ CREATE TABLE link
     -- lien ré-envoyé garde sa PREMIÈRE date de détection et prend la DERNIÈRE
     -- date de mise à jour, quel que soit l'ordre d'insertion. Lecture : FINAL
     -- ou GROUP BY avec min(detection_date) / max(version).
-    detection_date SimpleAggregateFunction(min, UInt64),
+    -- timestamp Unix (secondes) ; Int32 comme property.detection_date :
+    -- jusqu'au 2038-01-19
+    detection_date SimpleAggregateFunction(min, Int32),
     version        SimpleAggregateFunction(max, UInt64)
 )
 ENGINE = AggregatingMergeTree

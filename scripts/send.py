@@ -37,7 +37,10 @@ dates que properties.csv)
   - ignorées : type inconnu, valeur vide, payload absent (None)
 
 Dates (creation_date, update_date, version, detection_date) : datetime,
-timestamp Unix ou chaîne ISO, UTC si pas de fuseau.
+timestamp Unix ou chaîne ISO, UTC si pas de fuseau (datetime.now() est
+l'heure LOCALE : utiliser datetime.now(timezone.utc)). Dates absentes : la
+même heure (now) pour tout l'envoi — liens et propriétés envoyés par deux
+appels à send() n'ont donc pas la même date par défaut.
 
 Un seul envoi à la fois (deux envois concurrents liraient le même max(id)).
 
@@ -65,7 +68,7 @@ NODE_TABLES = {
 RANKED = {"fqdn", "ip"}
 NEW_RANK = 1000001
 CHUNK = 1000  # nombre de valeurs par requête de résolution
-INT32_MAX = 2**31 - 1  # property.detection_date en Int32 : jusqu'au 2038-01-19
+INT32_MAX = 2**31 - 1  # detection_date (link, property) en Int32 : jusqu'au 2038-01-19
 
 
 def to_ts(v, default: int) -> int:

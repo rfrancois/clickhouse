@@ -13,6 +13,7 @@ DROP TABLE IF EXISTS phone;
 DROP TABLE IF EXISTS social_id;
 DROP TABLE IF EXISTS link;
 DROP TABLE IF EXISTS property;
+DROP TABLE IF EXISTS property_detection;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :
 --    c'est l'index qui fait toute la différence, pas un changement de format
@@ -165,18 +166,23 @@ CREATE TABLE link
                          'phone' = 8, 'social_id' = 9),
     id_2           Int64,
     id_source      Int32,
-    detection_date UInt64,
-    version        UInt64
+    -- fusion colonne par colonne (pas ligne entière comme Replacing) : un
+    -- lien ré-envoyé garde sa PREMIÈRE date de détection et prend la DERNIÈRE
+    -- date de mise à jour, quel que soit l'ordre d'insertion. Lecture : FINAL
+    -- ou GROUP BY avec min(detection_date) / max(version).
+    detection_date SimpleAggregateFunction(min, UInt64),
+    version        SimpleAggregateFunction(max, UInt64)
 )
-ENGINE = ReplacingMergeTree(version)
+ENGINE = AggregatingMergeTree
 -- une partition par type de l'extrémité 1 : suppression / réimport d'un type
 -- entier par ALTER TABLE link DROP PARTITION 'xxx'
 PARTITION BY type_1
 -- index primaire (en RAM) réduit à ce qu'on filtre vraiment ; le tri complet
 -- reste la clé de déduplication : un couple ORIENTÉ PAR SOURCE = une ligne
 -- (A→B et B→A sont deux lignes distinctes ; un même lien vu par deux sources
--- aussi). Une nouvelle détection d'une même source remplace l'ancienne,
--- comme dans property. Voisins distincts : DISTINCT / GROUP BY à la lecture.
+-- aussi). Une nouvelle détection d'une même source fusionne avec l'ancienne
+-- (min / max des dates ci-dessus). Voisins distincts : DISTINCT / GROUP BY à
+-- la lecture.
 PRIMARY KEY (type_1, id_1)
 ORDER BY (type_1, id_1, type_2, id_2, id_source);
 
@@ -193,7 +199,6 @@ CREATE TABLE property
     id_source      Int32,
     -- renvoyé tel quel, jamais filtré : String compressé plutôt que JSON typé
     payload        String CODEC(ZSTD(3)),
-    detection_date DateTime,
     version        UInt64,
     -- « tout ce qu'a produit la source X » : projection légère (positions
     -- des lignes seulement, le payload n'est pas dupliqué)
@@ -205,3 +210,23 @@ PARTITION BY node_type
 -- remplace l'ancienne (dernière version), pas d'historique
 ORDER BY (node_type, id_node, id_source)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+-- 4) property_detection : date de PREMIÈRE détection de chaque propriété,
+--    à part de property. property garde la ligne entière de la dernière
+--    version (ReplacingMergeTree) et écraserait cette date à chaque nouvelle
+--    détection ; ici AggregatingMergeTree + min : une nouvelle détection
+--    d'une même source ne remplace jamais une date plus ancienne, quel que
+--    soit l'ordre d'insertion. Même clé que property.
+--    Lecture dédupliquée : FINAL, ou GROUP BY avec min(detection_date).
+CREATE TABLE property_detection
+(
+    node_type      Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
+                         'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
+                         'phone' = 8, 'social_id' = 9),
+    id_node        Int64,
+    id_source      Int32,
+    detection_date SimpleAggregateFunction(min, DateTime)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY node_type
+ORDER BY (node_type, id_node, id_source);

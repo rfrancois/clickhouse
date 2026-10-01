@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init upgrade generate test import pdf down clean
+.PHONY: all up wait init migration migration-swap upgrade generate test import pdf down clean
 
 all: up wait init generate
 
@@ -16,6 +16,16 @@ wait:
 init:
 	$(CLIENT) < sql/02_optimized.sql
 	@echo "Schéma optimisé créé."
+
+# Base existante : link → AggregatingMergeTree (première date de détection
+# conservée). Copie dans link_new, link intacte ; relançable.
+migration:
+	$(CLIENT) < sql/06_migrate_link_copy.sql
+
+# Bascule vers link_new (ancienne gardée sous link_old_replacing), après
+# contrôle des comptes.
+migration-swap:
+	$(CLIENT) < sql/07_migrate_link_swap.sql
 
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:

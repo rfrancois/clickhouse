@@ -9,7 +9,9 @@ Stack : ClickHouse 26.7 en Docker + scripts Python (venv local).
 - **Schéma de production** : une table de valeurs par type de nœud
   (`fqdn`, `ip`, `application`, `plugin`, ...) / `link`
   (index de saut `ngrambf_v1` sur `value`, ids typés `Int64`, liens
-  dupliqués dans les deux sens, `ReplacingMergeTree(version)`).
+  dupliqués dans les deux sens ; `ReplacingMergeTree(version)` pour les
+  tables de valeurs et `property`, `AggregatingMergeTree` pour `link` et
+  `property_detection`).
 
 ## Commandes
 
@@ -23,6 +25,10 @@ make init         # crée le schéma optimisé
 make generate     # insère 500k FQDN / 500k IP / 1M liens factices
 make test         # test rapide : LIKE + jointure sur les tables optimisées
 make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
+make migration    # base existante : copie link → link_new (AggregatingMergeTree)
+                  # et property.detection_date → property_detection
+make migration-swap  # bascule link ↔ link_new (ancienne : link_old_replacing)
+                     # et supprime property.detection_date
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -40,7 +46,7 @@ Fichiers reconnus (classification par nom) :
 |---|---|---|
 | `*node*.csv` | `id;value;type;creation_date;rank` (';', quoté) | table du `type` (`fqdn`, `ip`, `application`, ...) |
 | `*link*.csv` | `id_node_1;id_node_2;type_1;type_2;id_source;creation_date;update_date` | `link` |
-| `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` |
+| `*propert*.csv` | `id_node;type;id_source;payload;version;detection_date` (';', quoté, `\"` dans le payload) | `property` (+ `detection_date` → `property_detection`) |
 | `*.json` / `*.json.gz` | `{"cn":…, "dns":[…]\|null, "ip":…\|null}` (JSONEachRow) | `fqdn` (cn + dns), `ip` (ip, et cn / dns qui sont des IP) |
 
 Pipeline : extraction du zip → staging brut (`sql/04_import_staging.sql`,
@@ -93,10 +99,12 @@ Choix d'import :
   export MySQL), ce que le format CSV de ClickHouse ne lit pas : le fichier
   est chargé en `CustomSeparatedWithNames` avec la règle d'échappement
   `JSON` (fins de ligne `\r\n` acceptées). `version` → timestamp Unix ;
-  `detection_date` vide ou à la date zéro MySQL (`0000-00-00 00:00:00`)
-  → date de `version` ;
-- la déduplication est assurée par `ReplacingMergeTree(version)`
-  (asynchrone) ;
+  `detection_date` → `property_detection` (pas `property`), vide ou à la
+  date zéro MySQL (`0000-00-00 00:00:00`) → date de `version` ;
+- la déduplication est assurée par le moteur de chaque table
+  (asynchrone) : `ReplacingMergeTree(version)` pour les tables de valeurs
+  et `property` (dernière version gagnante), `AggregatingMergeTree` pour
+  `link` et `property_detection` (première date de détection conservée) ;
 - lignes malformées tolérées (0,1 % max, 1000 erreurs).
 
 Ré-import idempotent : on peut relancer `make import` sur un fichier déjà
@@ -175,9 +183,14 @@ type de chaque extrémité :
 - une seule table pour tous les couples de types, triée
   `(type_1, id_1, type_2, id_2, id_source)`, `PARTITION BY type_1` : une
   ligne par lien orienté **et par source** (un lien vu par deux sources
-  garde ses deux lignes ; une nouvelle détection d'une même source remplace
-  l'ancienne). Pour des voisins distincts, `DISTINCT` / `GROUP BY` à la
-  lecture ;
+  garde ses deux lignes). Pour des voisins distincts, `DISTINCT` /
+  `GROUP BY` à la lecture ;
+- `AggregatingMergeTree`, fusion **colonne par colonne** : une nouvelle
+  détection d'une même source fusionne avec l'ancienne en gardant la plus
+  ancienne `detection_date` (`min`, date de création, jamais écrasée par un
+  ré-envoi) et la plus récente `version` (`max`, date de mise à jour), quel
+  que soit l'ordre d'insertion. Lecture dédupliquée : `FINAL`, ou
+  `GROUP BY` avec `min(detection_date)` / `max(version)` ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
   les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
@@ -191,15 +204,28 @@ type de chaque extrémité :
 ### Table `property` (informations par nœud et par source)
 
 Une ligne par `(node_type, id_node, id_source)` : `payload` (JSON
-stocké en `String` compressé ZSTD, renvoyé tel quel), `detection_date`,
-`version`. `ReplacingMergeTree(version)` : une nouvelle détection d'une même
+stocké en `String` compressé ZSTD, renvoyé tel quel), `version`.
+`ReplacingMergeTree(version)` : une nouvelle détection d'une même
 source remplace l'ancienne (pas d'historique). `node_type` utilise le même
 `Enum8` que `link` : `(node_type, id_node)` identifie un nœud.
 Projection légère `p_source` pour « tout ce qu'a produit la source X ».
 
+### Table `property_detection` (date de première détection)
+
+Une ligne par `(node_type, id_node, id_source)`, même clé que `property` :
+`detection_date` seule, en `AggregatingMergeTree` avec `min`. Elle est à
+part parce que `property` garde la ligne entière de la dernière version et
+écraserait cette date à chaque nouvelle détection ; ici une nouvelle
+détection ne remplace jamais une date plus ancienne, quel que soit l'ordre
+d'insertion. Remplie par `make import` (colonne `detection_date` de
+`properties.csv`).
+
 ```sql
-SELECT id_source, payload, detection_date FROM property FINAL
-WHERE node_type = 'fqdn' AND id_node = 123456;
+SELECT p.id_source, p.payload, p.version, d.detection_date
+FROM property AS p FINAL
+LEFT JOIN (SELECT id_source, detection_date FROM property_detection FINAL
+           WHERE node_type = 'fqdn' AND id_node = 123456) AS d USING (id_source)
+WHERE p.node_type = 'fqdn' AND p.id_node = 123456;
 ```
 
 ## Résultats historiques (dans `results/`)

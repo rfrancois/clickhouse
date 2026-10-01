@@ -161,9 +161,10 @@ def distribute_properties() -> None:
     L'existence du nœud n'est pas vérifiée. Un type hors NODE_TABLES (absent
     de l'Enum8) ou un id_node non numérique : ligne ignorée (et comptée).
 
-    version (date de mise à jour) → timestamp Unix, now() si illisible ;
-    detection_date illisible (dont la date zéro MySQL 0000-00-00) → date de
-    version."""
+    version (date de mise à jour) → timestamp Unix, now() si illisible.
+    detection_date → property_detection (AggregatingMergeTree, garde la plus
+    ancienne), pas dans property ; illisible (dont la date zéro MySQL
+    0000-00-00) → date de version."""
     counts = query("SELECT lower(node_type), toInt64OrZero(id_node) != 0, count() "
                    "FROM stg_property GROUP BY 1, 2 ORDER BY 1, 2 FORMAT TSV")
     if not counts:
@@ -181,16 +182,19 @@ def distribute_properties() -> None:
     def date(col: str) -> str:
         return (f"if(startsWith({col}, '0000-00-00'), NULL, "
                 f"parseDateTimeBestEffortOrNull({col}))")
+    where = (f"FROM stg_property WHERE lower(node_type) IN ({TYPES_SQL}) "
+             "AND toInt64OrZero(id_node) != 0")
     query(
-        "INSERT INTO property "
-        "(node_type, id_node, id_source, payload, detection_date, version) "
+        "INSERT INTO property (node_type, id_node, id_source, payload, version) "
         "SELECT lower(node_type), toInt64OrZero(id_node), toInt32OrZero(id_source), "
         "payload, "
-        f"coalesce({date('detection_date')}, {date('version')}, now()), "
         f"coalesce(toUnixTimestamp({date('version')}), toUnixTimestamp(now())) "
-        f"FROM stg_property WHERE lower(node_type) IN ({TYPES_SQL}) "
-        "AND toInt64OrZero(id_node) != 0",
-        mem=True)
+        + where, mem=True)
+    query(
+        "INSERT INTO property_detection (node_type, id_node, id_source, detection_date) "
+        "SELECT lower(node_type), toInt64OrZero(id_node), toInt32OrZero(id_source), "
+        f"coalesce({date('detection_date')}, {date('version')}, now()) "
+        + where, mem=True)
     for line in counts.splitlines():
         typ, valid, cnt = line.split("\t")
         if typ in NODE_TABLES and valid == "1":
@@ -323,6 +327,8 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     # sans projection inverse (cf. 02_optimized.sql) : chaque lien résolu est
     # inséré dans les DEUX sens (n1→n2 et n2→n1). Auto-liens (même type et
     # même id des deux côtés : fqdn ↔ lui-même, ip ↔ elle-même) écartés.
+    # creation_date vide → update_date, puis now() ; link garde la plus
+    # ancienne (min) : un lien ré-importé conserve sa date de création.
     t = time.monotonic()
     for k in range(n):
         base = (
@@ -337,14 +343,16 @@ def distribute_links(n: int = LINK_SLICES) -> None:
             "INSERT INTO link "
             "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
             "SELECT l.t1, n1.id, l.t2, n2.id, toInt32OrZero(l.id_source), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
+            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), "
+            "toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
             + base, mem=True)
         query(
             "INSERT INTO link "
             "(type_1, id_1, type_2, id_2, id_source, detection_date, version) "
             "SELECT l.t2, n2.id, l.t1, n1.id, toInt32OrZero(l.id_source), "
-            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), toUnixTimestamp(now())), "
+            "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.creation_date)), "
+            "toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())), "
             "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(l.update_date)), toUnixTimestamp(now())) "
             + base, mem=True)
     log(f"  liens réécrits (2 sens) en {time.monotonic() - t:.0f} s")
@@ -476,6 +484,9 @@ def main() -> None:
         log("Tables optimisées absentes → création du schéma "
             "(sql/02_optimized.sql)...")
         run_sql_file(ROOT / "sql" / "02_optimized.sql")
+    elif query("EXISTS TABLE property_detection") != "1":
+        sys.exit("Schéma antérieur à property_detection : lancer d'abord "
+                 "make migration puis make migration-swap.")
 
     files, tmp = collect_files(src)
     try:

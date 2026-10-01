@@ -5,6 +5,10 @@ Version autonome et simplifiée de distribute_links() (import_data.py) :
   - chaque lien est un dict avec les champs :
       value_1, value_2, type_1, type_2, id_source, creation_date, update_date
     (value_1 / value_2 : "google.com", "8.8.8.8", ...)
+    creation_date et update_date sont optionnels : update_date absent → now ;
+    creation_date absent → update_date. link (AggregatingMergeTree) garde la
+    plus ANCIENNE creation_date et la plus RÉCENTE update_date d'un lien :
+    un lien déjà connu garde donc sa date de création.
   - chaque valeur est résolue en id dans la table de son type ; une valeur
     inconnue reçoit un nouvel id auto-incrémenté (max(id) + 1, ...), avec
     rank 1000000 pour fqdn / ip
@@ -69,9 +73,9 @@ def send_links(links: list[dict]) -> None:
             continue
         if t1 == t2 and v1 == v2:
             continue
-        rows.append((t1, v1, t2, v2, int(l.get("id_source") or 0),
-                     to_ts(l.get("creation_date"), now),
-                     to_ts(l.get("update_date"), now)))
+        ver = to_ts(l.get("update_date"), now)
+        det = to_ts(l.get("creation_date"), ver)
+        rows.append((t1, v1, t2, v2, int(l.get("id_source") or 0), det, ver))
 
     # 2. valeur → id, par type (nouvel id si la valeur est inconnue)
     ids = {}  # (type, valeur) → id
@@ -84,7 +88,10 @@ def send_links(links: list[dict]) -> None:
             res = client.query(
                 f"SELECT value, argMax({idcol}, version) FROM {typ} "
                 "WHERE value IN {vals:Array(String)} GROUP BY value",
-                parameters={"vals": values[i:i + CHUNK]})
+                parameters={"vals": values[i:i + CHUNK]},
+                # l'index primaire suffit (égalité) : inutile de charger les
+                # index ngram / texte de fqdn, qui ne filtrent rien de plus
+                settings={"use_skip_indexes": 0})
             for value, id_ in res.result_rows:
                 ids[(typ, value)] = id_
 

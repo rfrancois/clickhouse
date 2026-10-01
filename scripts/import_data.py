@@ -33,7 +33,7 @@ tient le milliard de lignes) :
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
        Docker modeste) : résolution valeur → id ; toute valeur absente de
        sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
-       type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
+       type (rank 1000001 pour fqdn/ip) ; chaque lien est inséré dans link
        DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même)
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
@@ -71,7 +71,7 @@ NODE_TABLES = {
     "social_id":         "id_social_id",
 }
 RANKED = {"fqdn", "ip"}
-NEW_RANK = 1000000  # rank des nœuds sans rank connu (fin de ORDER BY rank)
+NEW_RANK = 1000001  # rank des nœuds sans rank connu (fin de ORDER BY rank)
 TYPES_SQL = ", ".join(f"'{t}'" for t in NODE_TABLES)
 
 CLIENT = ["docker", "exec", "-i", "ch_container", "clickhouse-client",
@@ -233,7 +233,7 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     types de NODE_TABLES. Une valeur déjà présente dans la table <type>
     garde son id ; une valeur absente est créée avec un nouvel id
     AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
-    ...), rank = 1000000 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
+    ...), rank = 1000001 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
     table : ses liens sont ignorés (et comptés).
 
     Suppose un seul import à la fois : deux imports concurrents liraient le

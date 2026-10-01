@@ -74,7 +74,7 @@ Choix d'import :
   l'id existant (le plus ancien, `min(id)`, si elle en a plusieurs) ; si
   elle est absente, elle reçoit un **nouvel id
   auto-incrémenté** à partir du `max(id)` du type déjà en base
-  (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = 1000000`
+  (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = 1000001`
   pour `fqdn` / `ip`).
   Un seul import à la fois (deux imports concurrents liraient le même max) ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
@@ -102,7 +102,7 @@ Choix d'import :
     `fe80::/10`, `ff00::/8`), noms d'hôte invalides (`localhost`, espaces,
     `@`, `/`, `CN=…`, label > 63 caractères, nom > 253, TLD numérique) ;
   - les IP privées (`10/8`, `192.168/16`...) sont **conservées** ;
-- `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
+- `rank` absent ou à 0 → `1000001` (ces lignes passent en fin de
   `ORDER BY rank`) ;
 - `properties.csv` référence les nœuds par leur **id** (pas par valeur) :
   insertion directe dans `property`, sans résolution ni vérification que le

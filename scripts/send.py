@@ -11,7 +11,7 @@ Version autonome et simplifiée de distribute_links() / distribute_properties()
   - chaque valeur est résolue en id dans la table de son type (une seule
     résolution pour les liens et les propriétés) ; une valeur inconnue
     reçoit un nouvel id auto-incrémenté (max(id) + 1, ...), avec rank
-    1000000 pour fqdn / ip
+    1000001 pour fqdn / ip
 
 Liens : chaque lien est un dict avec les champs
       value_1, value_2, type_1, type_2, source_uuid, detection_date, update_date

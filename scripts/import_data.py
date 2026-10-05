@@ -33,7 +33,7 @@ tient le milliard de lignes) :
      - puis distribute_links, en N tranches (pour tenir en RAM sur une VM
        Docker modeste) : résolution valeur → id ; toute valeur absente de
        sa table reçoit un nouvel id AUTO-INCRÉMENTÉ à partir du max(id) du
-       type (rank 1000000 pour fqdn/ip) ; chaque lien est inséré dans link
+       type (rank NULL pour fqdn/ip) ; chaque lien est inséré dans link
        DANS LES DEUX SENS, sauf les auto-liens (nœud lié à lui-même)
 
 link n'a pas de projection inverse : chaque lien est physiquement dupliqué
@@ -71,7 +71,6 @@ NODE_TABLES = {
     "social_id":         "id_social_id",
 }
 RANKED = {"fqdn", "ip"}
-NEW_RANK = 1000000  # rank des nœuds sans rank connu (fin de ORDER BY rank)
 TYPES_SQL = ", ".join(f"'{t}'" for t in NODE_TABLES)
 
 CLIENT = ["docker", "exec", "-i", "ch_container", "clickhouse-client",
@@ -143,8 +142,8 @@ def distribute_nodes() -> None:
         query(
             f"INSERT INTO {typ} (value, {idcol}, {'rank, ' if ranked else ''}version) "
             "SELECT value, toInt64OrZero(id), "
-            + (f"if(toInt32OrZero(rank) = 0, {NEW_RANK}, toInt32OrZero(rank)), "
-               if ranked else "")
+            # rank absent ou 0 → NULL (inconnu, n'efface pas un rank connu)
+            + ("nullIf(toInt32OrZero(rank), 0), " if ranked else "")
             + "coalesce(toUnixTimestamp(parseDateTimeBestEffortOrNull(creation_date)), "
             "toUnixTimestamp(now())) "
             f"FROM stg_node WHERE lower(node_type) = '{typ}' AND value != ''",
@@ -233,7 +232,7 @@ def distribute_links(n: int = LINK_SLICES) -> None:
     types de NODE_TABLES. Une valeur déjà présente dans la table <type>
     garde son id ; une valeur absente est créée avec un nouvel id
     AUTO-INCRÉMENTÉ à partir du max(id) existant du type (max + 1, max + 2,
-    ...), rank = 1000000 pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
+    ...), rank NULL pour fqdn / ip. Un type hors NODE_TABLES n'a pas de
     table : ses liens sont ignorés (et comptés).
 
     Suppose un seul import à la fois : deux imports concurrents liraient le
@@ -308,11 +307,10 @@ def distribute_links(n: int = LINK_SLICES) -> None:
                 mem=True)
             base = max(base, int(query(
                 f"SELECT max(id) FROM tmp_node_map WHERE node_type = '{typ}'")))
-        ranked = typ in RANKED
+        # rank (fqdn, ip) non fourni : NULL par défaut
         query(
-            f"INSERT INTO {typ} (value, {idcol}, {'rank, ' if ranked else ''}version) "
-            f"SELECT value, id, {f'{NEW_RANK}, ' if ranked else ''}"
-            "toUnixTimestamp(now()) "
+            f"INSERT INTO {typ} (value, {idcol}, version) "
+            "SELECT value, id, toUnixTimestamp(now()) "
             f"FROM tmp_node_map WHERE node_type = '{typ}' AND id > {start}",
             mem=True)
         log(f"  {base - start:,} nœuds {typ} créés "

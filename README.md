@@ -39,6 +39,11 @@ make migration-property-int  # property déjà migrée : detection_date DateTime
                              # → Int32 (timestamp Unix), en place
 make migration-link-int  # link.detection_date UInt64 → Int32 (comme property),
                          # en place
+make migration-rank  # base existante : crée la table rank
+make migration-rank-nullable  # base existante : fqdn.rank / ip.rank → Nullable,
+                              # 1000000 / 1000001 → NULL, en place
+make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
+                     # ranks d'une semaine → table rank (voir plus bas)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -74,7 +79,7 @@ Choix d'import :
   l'id existant (le plus ancien, `min(id)`, si elle en a plusieurs) ; si
   elle est absente, elle reçoit un **nouvel id
   auto-incrémenté** à partir du `max(id)` du type déjà en base
-  (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = 1000000`
+  (`max + 1`, `max + 2`, ...), avec `version = now()` (et `rank = NULL`
   pour `fqdn` / `ip`).
   Un seul import à la fois (deux imports concurrents liraient le même max) ;
 - les liens référencent des **valeurs** (ex. `netflix.com`) + le type de
@@ -102,8 +107,8 @@ Choix d'import :
     `fe80::/10`, `ff00::/8`), noms d'hôte invalides (`localhost`, espaces,
     `@`, `/`, `CN=…`, label > 63 caractères, nom > 253, TLD numérique) ;
   - les IP privées (`10/8`, `192.168/16`...) sont **conservées** ;
-- `rank` absent ou à 0 → `1000000` (ces lignes passent en fin de
-  `ORDER BY rank`) ;
+- `rank` absent ou à 0 → `NULL` (inconnu : en fin de `ORDER BY rank`, et
+  n'efface pas un rank déjà connu, `anyLast` ignorant les `NULL`) ;
 - `properties.csv` référence les nœuds par leur **id** (pas par valeur) :
   insertion directe dans `property`, sans résolution ni vérification que le
   nœud existe. Ses guillemets internes sont échappés par backslash (`\"`,
@@ -134,6 +139,53 @@ EXPLAIN indexes = 1
 SELECT id_fqdn, value FROM fqdn WHERE value LIKE '%tube%' LIMIT 100;
 ```
 
+## Historique des ranks (table `rank`)
+
+Un rank par nœud classé (`fqdn` ou `ip`), par source et par semaine, sur
+**2 ans glissants** :
+
+```bash
+make ranks FILE=ranks.csv SOURCE=<source_uuid> WEEK=2026-10-05 [TYPE=ip]
+```
+
+- fichier : CSV à deux colonnes, rank et valeur dans n'importe quel ordre
+  (`1,google.com` ou `google.com;1`), en-tête facultatif, `.gz` accepté ;
+- `WEEK` : date du relevé, ramenée au **lundi** (défaut : aujourd'hui,
+  UTC). Renvoyer une semaine **remplace** ses ranks (`ReplacingMergeTree`,
+  une ligne par `(node_type, id_node, id_source, week)`) ;
+- `TYPE` : `fqdn` (défaut) ou `ip`. `(node_type, id_node)` identifie le
+  nœud, comme dans `link` et `property` ;
+- valeurs normalisées et validées : FQDN comme ceux de `domains.json` (IP,
+  wildcards, noms invalides rejetés et comptés), IP en forme canonique ;
+  une valeur en double garde son meilleur rank ;
+- tout est fait côté serveur (`scripts/send_ranks.py`) : chargement dans
+  une table de staging, recherche des valeurs absentes de la table du type,
+  création de ces nœuds (nouvel id `max(id) + 1`, ..., rank `NULL` par
+  défaut), résolution valeur → `min(id)` en une seule jointure, puis
+  insertion dans `rank` ;
+- **rank de `fqdn` / `ip`** : chaque envoi y écrit aussi son rank
+  (`anyLast`) : le rank d'un nœud est celui du **dernier** envoi, toutes
+  sources confondues ;
+- purge : `TTL week + INTERVAL 2 YEAR`, partition par mois
+  (`ttl_only_drop_parts`) : un mois expiré est supprimé d'un bloc, sans
+  réécriture. Un import hebdomadaire n'écrit et ne fait merger que le mois
+  en cours.
+
+Lecture (filtrer sur `week` : une partition expirée n'est pas supprimée
+instantanément) :
+
+```sql
+SELECT r.id_source, r.week, r.rank
+FROM rank AS r FINAL
+WHERE r.node_type = 'fqdn'
+  AND r.id_node = (SELECT min(id_fqdn) FROM fqdn WHERE value = 'google.com')
+  AND r.week > today() - INTERVAL 2 YEAR
+ORDER BY r.id_source, r.week;
+```
+
+Un seul `make ranks` à la fois. Base existante : `make migration-rank`
+(`sql/14_create_rank.sql`) avant le premier envoi.
+
 ## Recherche `LIKE '%…%'` triée par rank
 
 ```sql
@@ -154,8 +206,9 @@ Une valeur ré-insérée sous un autre id (ex. `node.csv` qui fournit ses
 propres ids) fusionne avec la ligne existante, colonne par colonne :
 - `id_<type>` : `min` — l'id le plus **ancien** est gardé (ids
   auto-incrémentés) ;
-- `rank` (`fqdn` et `ip`) : `anyLast` — le rank du **dernier insert**
-  (ordre d'insertion, pas `version`) ;
+- `rank` (`fqdn` et `ip`, `Nullable`) : `anyLast` — le rank du **dernier
+  insert** qui en fournit un (ordre d'insertion, pas `version` ; `NULL` =
+  inconnu, ignoré à la fusion) ;
 - `version` : `max` — la plus récente date de mise à jour.
 
 Lecture dédupliquée avant fusion : `FINAL`, ou `GROUP BY value` avec
@@ -183,7 +236,7 @@ Diagnostic de performance : `sql/diag_rank.sql` (lecture seule).
 
 ### Table `ip`
 
-Même principe (projection `p_id`, rank 0 → 1 000 000), avec deux
+Même principe (projection `p_id`, rank 0 → `NULL`), avec deux
 différences :
 - triée par valeur dans l'ordre **normal** (`ORDER BY value`) : pour
   une IP, c'est le préfixe qui regroupe (sous-réseau), donc

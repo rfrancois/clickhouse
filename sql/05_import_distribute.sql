@@ -8,7 +8,7 @@
 -- comme les liens CSV par scripts/import_data.py (distribute_links) :
 --   * valeur déjà connue de fqdn / ip → on reprend son id ;
 --   * valeur inconnue → nouvel id auto-incrémenté à partir du max(id) du type,
---     rank = 1000000, version = now().
+--     rank NULL, version = now().
 -- Cette résolution est faite en TRANCHES côté Python, sinon les jointures sur
 -- les grosses tables font tuer le serveur par l'OOM killer (exit 137) sur les
 -- VM Docker à faible RAM.

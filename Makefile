@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int upgrade generate test import pdf down clean
+.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int migration-rank migration-rank-nullable upgrade generate test import ranks pdf down clean
 
 all: up wait init generate
 
@@ -60,6 +60,16 @@ migration-property-int:
 migration-link-int:
 	$(CLIENT) < sql/13_migrate_link_detection_int.sql
 
+# Base existante : création de la table rank (déjà créée par make init),
+# aucune autre table touchée ; relançable.
+migration-rank:
+	$(CLIENT) < sql/14_create_rank.sql
+
+# Base existante : fqdn.rank / ip.rank Int32 → Nullable(Int32), en place
+# (ALTER) ; 1000000 / 1000001 (rank inconnu) → NULL.
+migration-rank-nullable:
+	$(CLIENT) < sql/15_migrate_rank_nullable.sql
+
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:
 	docker compose pull
@@ -76,6 +86,13 @@ test: .venv
 import:
 	@test -n "$(FILE)" || { echo "Usage : make import FILE=<archive.zip|fichier|dossier>"; exit 1; }
 	$(PYTHON) scripts/import_data.py "$(FILE)"
+
+# Ranks d'une semaine pour une source → table rank.
+# WEEK facultatif (date du relevé, ramenée au lundi ; défaut : aujourd'hui),
+# TYPE facultatif (fqdn, défaut, ou ip).
+ranks: .venv
+	@test -n "$(FILE)" -a -n "$(SOURCE)" || { echo "Usage : make ranks FILE=<ranks.csv[.gz]> SOURCE=<source_uuid> [WEEK=AAAA-MM-JJ] [TYPE=fqdn|ip]"; exit 1; }
+	$(PYTHON) scripts/send_ranks.py "$(FILE)" "$(SOURCE)" $(if $(WEEK),--week $(WEEK)) $(if $(TYPE),--type $(TYPE))
 
 pdf: .venv
 	$(PYTHON) scripts/make_pdf.py

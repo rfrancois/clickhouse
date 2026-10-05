@@ -14,6 +14,7 @@ DROP TABLE IF EXISTS social_id;
 DROP TABLE IF EXISTS link;
 DROP TABLE IF EXISTS property;
 DROP TABLE IF EXISTS property_detection;
+DROP TABLE IF EXISTS rank;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :
 --    c'est l'index qui fait toute la différence, pas un changement de format
@@ -23,9 +24,11 @@ CREATE TABLE fqdn
     -- une ligne par nom, fusion colonne par colonne (AggregatingMergeTree) :
     -- un nom ré-inséré avec un autre id garde son id le plus ANCIEN (ids
     -- auto-incrémentés → min), le rank du DERNIER insert (anyLast, ordre
-    -- d'insertion, pas version) et la plus récente version (max)
+    -- d'insertion, pas version) et la plus récente version (max).
+    -- rank NULL = inconnu (en fin de ORDER BY rank) ; anyLast ignore les
+    -- NULL : un insert sans rank n'efface jamais un rank connu
     id_fqdn  SimpleAggregateFunction(min, Int64),
-    rank     SimpleAggregateFunction(anyLast, Int32),
+    rank     SimpleAggregateFunction(anyLast, Nullable(Int32)),
     version  SimpleAggregateFunction(max, UInt64),
     INDEX idx_ngram value TYPE ngrambf_v1(3, 16384, 4, 0) GRANULARITY 1,
     -- index texte EXACT pour LIKE '%…%' : lit ~5x moins de blocs que le ngram
@@ -47,9 +50,10 @@ SETTINGS deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE ip
 (
     value    String,
-    -- une ligne par IP, même fusion que fqdn (id min, rank anyLast, version max)
+    -- une ligne par IP, même fusion que fqdn (id min, rank anyLast, NULL =
+    -- inconnu, version max)
     id_ip    SimpleAggregateFunction(min, Int64),
-    rank     SimpleAggregateFunction(anyLast, Int32),
+    rank     SimpleAggregateFunction(anyLast, Nullable(Int32)),
     version  SimpleAggregateFunction(max, UInt64),
     -- pas d'index ngram/texte : une IP n'a que des chiffres et des points, les
     -- trigrammes sont partout, l'index ne filtre rien (testé, plus lent avec)
@@ -223,3 +227,36 @@ ENGINE = AggregatingMergeTree
 PARTITION BY node_type
 ORDER BY (node_type, id_node, id_source)
 SETTINGS deduplicate_merge_projection_mode = 'rebuild';
+
+-- 4) rank : un rank par (nœud classé, source, semaine), sur 2 ans glissants
+--    (scripts/send_ranks.py). (node_type, id_node) identifie le nœud, comme
+--    dans link et property ; seuls fqdn et ip ont un rank. Lignes étroites
+--    plutôt qu'un tableau JSON dans property : l'import hebdomadaire n'écrit
+--    que ~16 octets par nœud, sans relire ni réécrire l'historique.
+CREATE TABLE rank
+(
+    -- même Enum8 que link / property : ajouter un nouveau type À LA FIN, partout
+    node_type  Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4,
+                     'plugin' = 5, 'organization_name' = 6, 'organization_id' = 7,
+                     'phone' = 8, 'social_id' = 9),
+    -- même id que fqdn.id_fqdn / ip.id_ip (le min, celui qui survit aux merges)
+    id_node    Int64 CODEC(Delta, ZSTD),
+    id_source  Int32,
+    -- lundi de la semaine du relevé (toMonday)
+    week       Date  CODEC(Delta, ZSTD),
+    -- d'une semaine à l'autre, le rank d'un nœud varie peu : Delta
+    rank       Int32 CODEC(Delta, ZSTD)
+)
+-- (nœud, source, semaine) ré-envoyé = une seule ligne, celle du dernier
+-- insert : relancer une semaine corrige ses ranks
+ENGINE = ReplacingMergeTree
+-- une partition par mois : l'import d'une semaine ne touche (et ne fait
+-- merger) que le mois en cours, jamais les 2 ans d'historique
+PARTITION BY toYYYYMM(week)
+-- tout l'historique d'un nœud, toutes sources, est contigu
+ORDER BY (node_type, id_node, id_source, week)
+-- purge par mois entier (suppression de parts, aucune réécriture) ; à la
+-- lecture, filtrer quand même sur week (une part expirée n'est pas
+-- supprimée instantanément)
+TTL week + INTERVAL 2 YEAR DELETE
+SETTINGS ttl_only_drop_parts = 1;

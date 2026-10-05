@@ -10,8 +10,8 @@ Version autonome et simplifiée de distribute_links() / distribute_properties()
 "8.8.8.8", ...) et leur type, dans les liens comme dans les propriétés :
   - chaque valeur est résolue en id dans la table de son type (une seule
     résolution pour les liens et les propriétés) ; une valeur inconnue
-    reçoit un nouvel id auto-incrémenté (max(id) + 1, ...), avec rank
-    1000000 pour fqdn / ip
+    reçoit un nouvel id auto-incrémenté (max(id) + 1, ...), rank NULL
+    (inconnu) pour fqdn / ip
 
 Liens : chaque lien est un dict avec les champs
       value_1, value_2, type_1, type_2, source_uuid, detection_date, update_date
@@ -72,8 +72,6 @@ NODE_TABLES = {
 }
 # table source : uuid → id_source
 SOURCE_TABLE, SOURCE_ID, SOURCE_UUID = "source", "id_source", "uuid"
-RANKED = {"fqdn", "ip"}
-NEW_RANK = 1000001
 CHUNK = 1000  # nombre de valeurs par requête de résolution
 INT32_MAX = 2**31 - 1  # detection_date (link, property) en Int32 : jusqu'au 2038-01-19
 
@@ -142,9 +140,9 @@ def resolve_ids(client, nodes: set[tuple[str, str]], now: int) -> dict:
             new_rows = []
             for v in new:
                 ids[(typ, v)] = next_id
-                new_rows.append([v, next_id] + ([NEW_RANK] if typ in RANKED else []) + [now])
+                new_rows.append([v, next_id, now])  # rank (fqdn, ip) : NULL par défaut
                 next_id += 1
-            cols = ["value", idcol] + (["rank"] if typ in RANKED else []) + ["version"]
+            cols = ["value", idcol, "version"]
             client.insert(typ, new_rows, column_names=cols)
         print(f"{typ} : {len(values) - len(new):,} existants, {len(new):,} créés")
     return ids

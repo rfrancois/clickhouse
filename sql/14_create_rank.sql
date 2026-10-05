@@ -13,13 +13,13 @@ CREATE TABLE IF NOT EXISTS rank
                      'phone' = 8, 'social_id' = 9),
     id_node    Int64 CODEC(Delta, ZSTD),
     id_source  Int32,
-    week       Date  CODEC(Delta, ZSTD),
+    creation_date  Int32 CODEC(DoubleDelta, ZSTD),
     rank       Int32 CODEC(Delta, ZSTD)
 )
 ENGINE = ReplacingMergeTree
-PARTITION BY toYYYYMM(week)
-ORDER BY (node_type, id_node, id_source, week)
-TTL week + INTERVAL 2 YEAR DELETE
+PARTITION BY toYYYYMM(toDateTime(creation_date, 'UTC'))
+ORDER BY (node_type, id_node, id_source, creation_date)
+TTL toDateTime(creation_date, 'UTC') + INTERVAL 2 YEAR DELETE
 SETTINGS ttl_only_drop_parts = 1;
 
 SELECT name AS table_, engine FROM system.tables

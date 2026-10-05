@@ -242,21 +242,24 @@ CREATE TABLE rank
     -- même id que fqdn.id_fqdn / ip.id_ip (le min, celui qui survit aux merges)
     id_node    Int64 CODEC(Delta, ZSTD),
     id_source  Int32,
-    -- lundi de la semaine du relevé (toMonday)
-    week       Date  CODEC(Delta, ZSTD),
+    -- timestamp Unix (secondes) du SAMEDI 00:00 UTC de la semaine du relevé
+    -- (fin de la semaine anglaise, dimanche → samedi) ; Int32 comme
+    -- link / property.detection_date : jusqu'au 2038-01-19. Pas de 7 jours
+    -- constant d'une ligne à l'autre : DoubleDelta le code en quasi rien
+    creation_date  Int32 CODEC(DoubleDelta, ZSTD),
     -- d'une semaine à l'autre, le rank d'un nœud varie peu : Delta
     rank       Int32 CODEC(Delta, ZSTD)
 )
 -- (nœud, source, semaine) ré-envoyé = une seule ligne, celle du dernier
 -- insert : relancer une semaine corrige ses ranks
 ENGINE = ReplacingMergeTree
--- une partition par mois : l'import d'une semaine ne touche (et ne fait
--- merger) que le mois en cours, jamais les 2 ans d'historique
-PARTITION BY toYYYYMM(week)
+-- une partition par mois (UTC) : l'import d'une semaine ne touche (et ne
+-- fait merger) que le mois en cours, jamais les 2 ans d'historique
+PARTITION BY toYYYYMM(toDateTime(creation_date, 'UTC'))
 -- tout l'historique d'un nœud, toutes sources, est contigu
-ORDER BY (node_type, id_node, id_source, week)
+ORDER BY (node_type, id_node, id_source, creation_date)
 -- purge par mois entier (suppression de parts, aucune réécriture) ; à la
--- lecture, filtrer quand même sur week (une part expirée n'est pas
+-- lecture, filtrer quand même sur creation_date (une part expirée n'est pas
 -- supprimée instantanément)
-TTL week + INTERVAL 2 YEAR DELETE
+TTL toDateTime(creation_date, 'UTC') + INTERVAL 2 YEAR DELETE
 SETTINGS ttl_only_drop_parts = 1;

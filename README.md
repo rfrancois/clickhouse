@@ -42,6 +42,8 @@ make migration-link-int  # link.detection_date UInt64 → Int32 (comme property)
 make migration-rank  # base existante : crée la table rank
 make migration-rank-nullable  # base existante : fqdn.rank / ip.rank → Nullable,
                               # 1000000 / 1000001 → NULL, en place
+make migration-rank-date  # rank.week (Date, lundi) → creation_date (timestamp,
+                          # samedi) ; ancienne table gardée sous rank_old_week
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
@@ -150,9 +152,11 @@ make ranks FILE=ranks.csv SOURCE=<source_uuid> WEEK=2026-10-05 [TYPE=ip]
 
 - fichier : CSV à deux colonnes, rank et valeur dans n'importe quel ordre
   (`1,google.com` ou `google.com;1`), en-tête facultatif, `.gz` accepté ;
-- `WEEK` : date du relevé, ramenée au **lundi** (défaut : aujourd'hui,
-  UTC). Renvoyer une semaine **remplace** ses ranks (`ReplacingMergeTree`,
-  une ligne par `(node_type, id_node, id_source, week)`) ;
+- `WEEK` : date du relevé, ramenée au **samedi** de sa semaine anglaise
+  (dimanche → samedi ; défaut : aujourd'hui, UTC), stockée dans
+  `creation_date` en timestamp Unix (`Int32`) du samedi 00:00 UTC.
+  Renvoyer une semaine **remplace** ses ranks (`ReplacingMergeTree`, une
+  ligne par `(node_type, id_node, id_source, creation_date)`) ;
 - `TYPE` : `fqdn` (défaut) ou `ip`. `(node_type, id_node)` identifie le
   nœud, comme dans `link` et `property` ;
 - valeurs normalisées et validées : FQDN comme ceux de `domains.json` (IP,
@@ -166,21 +170,21 @@ make ranks FILE=ranks.csv SOURCE=<source_uuid> WEEK=2026-10-05 [TYPE=ip]
 - **rank de `fqdn` / `ip`** : chaque envoi y écrit aussi son rank
   (`anyLast`) : le rank d'un nœud est celui du **dernier** envoi, toutes
   sources confondues ;
-- purge : `TTL week + INTERVAL 2 YEAR`, partition par mois
+- purge : `TTL toDateTime(creation_date) + INTERVAL 2 YEAR`, partition par mois
   (`ttl_only_drop_parts`) : un mois expiré est supprimé d'un bloc, sans
   réécriture. Un import hebdomadaire n'écrit et ne fait merger que le mois
   en cours.
 
-Lecture (filtrer sur `week` : une partition expirée n'est pas supprimée
-instantanément) :
+Lecture (filtrer sur `creation_date` : une partition expirée n'est pas
+supprimée instantanément) :
 
 ```sql
-SELECT r.id_source, r.week, r.rank
+SELECT r.id_source, toDate(toDateTime(r.creation_date, 'UTC')) AS samedi, r.rank
 FROM rank AS r FINAL
 WHERE r.node_type = 'fqdn'
   AND r.id_node = (SELECT min(id_fqdn) FROM fqdn WHERE value = 'google.com')
-  AND r.week > today() - INTERVAL 2 YEAR
-ORDER BY r.id_source, r.week;
+  AND r.creation_date > toUnixTimestamp(now() - INTERVAL 2 YEAR)
+ORDER BY r.id_source, r.creation_date;
 ```
 
 Un seul `make ranks` à la fois. Base existante : `make migration-rank`

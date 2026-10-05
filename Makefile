@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int migration-rank migration-rank-nullable upgrade generate test import ranks pdf down clean
+.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int migration-rank migration-rank-nullable migration-rank-date upgrade generate test import ranks pdf down clean
 
 all: up wait init generate
 
@@ -70,6 +70,11 @@ migration-rank:
 migration-rank-nullable:
 	$(CLIENT) < sql/15_migrate_rank_nullable.sql
 
+# Base dont rank a encore week (Date, lundi) : → creation_date (timestamp
+# Int32, samedi). Copie + échange (ancienne gardée sous rank_old_week).
+migration-rank-date:
+	$(CLIENT) < sql/16_migrate_rank_creation_date.sql
+
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:
 	docker compose pull
@@ -88,7 +93,7 @@ import:
 	$(PYTHON) scripts/import_data.py "$(FILE)"
 
 # Ranks d'une semaine pour une source → table rank.
-# WEEK facultatif (date du relevé, ramenée au lundi ; défaut : aujourd'hui),
+# WEEK facultatif (date du relevé, ramenée au samedi ; défaut : aujourd'hui),
 # TYPE facultatif (fqdn, défaut, ou ip).
 ranks: .venv
 	@test -n "$(FILE)" -a -n "$(SOURCE)" || { echo "Usage : make ranks FILE=<ranks.csv[.gz]> SOURCE=<source_uuid> [WEEK=AAAA-MM-JJ] [TYPE=fqdn|ip]"; exit 1; }

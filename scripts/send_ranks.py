@@ -14,9 +14,11 @@ Fichier : CSV à deux colonnes, rank et valeur dans n'importe quel ordre
 (détecté : la colonne numérique est le rank), séparateur ',' ou ';',
 en-tête facultatif (ignoré s'il n'a pas de colonne numérique).
 
-Semaine : date (datetime, date ou chaîne ISO) du relevé, ramenée au lundi ;
-absente → aujourd'hui (UTC). rank garde une ligne par (nœud, source,
-semaine) : renvoyer une semaine remplace ses ranks.
+Semaine : date (datetime, date ou chaîne ISO) du relevé, ramenée au samedi
+de sa semaine anglaise (dimanche → samedi) ; absente → aujourd'hui (UTC).
+Stockée dans rank.creation_date en timestamp Unix du samedi 00:00 UTC.
+rank garde une ligne par (nœud, source, semaine) : renvoyer une semaine
+remplace ses ranks.
 
 Tout se fait côté serveur, sans aller-retour des ids vers Python :
   1. chargement brut dans stg_rank
@@ -78,16 +80,17 @@ NORMALIZE = {
 SETTINGS = {"use_skip_indexes": 0}
 
 
-def to_monday(v) -> date:
-    """Date (datetime, date, chaîne ISO ou None = aujourd'hui UTC) → lundi
-    de sa semaine."""
+def to_saturday(v) -> date:
+    """Date (datetime, date, chaîne ISO ou None = aujourd'hui UTC) → samedi
+    de sa semaine anglaise (dimanche → samedi)."""
     if v is None:
         v = datetime.now(timezone.utc).date()
     elif isinstance(v, str):
         v = datetime.fromisoformat(v.strip())
     if isinstance(v, datetime):
         v = v.date()
-    return v - timedelta(days=v.weekday())
+    # weekday() : lundi = 0 ... dimanche = 6 → jours écoulés depuis dimanche
+    return v + timedelta(days=6 - (v.weekday() + 1) % 7)
 
 
 def is_int(s: str) -> bool:
@@ -136,12 +139,15 @@ def send_ranks(ranks, source_uuid: str, week=None, node_type: str = "fqdn") -> N
     if src is None:
         sys.exit(f"ERREUR : source_uuid {uuid + ' inconnu' if uuid else 'absent'}")
 
-    monday = to_monday(week)
-    if monday + timedelta(days=730) <= datetime.now(timezone.utc).date():
-        sys.exit(f"ERREUR : semaine du {monday} vieille de plus de 2 ans "
+    saturday = to_saturday(week)
+    if saturday + timedelta(days=730) <= datetime.now(timezone.utc).date():
+        sys.exit(f"ERREUR : semaine du samedi {saturday} vieille de plus de 2 ans "
                  "(supprimée par le TTL de rank)")
-    params = {"src": src, "week": monday, "re": FQDN_RE}
-    print(f"{typ}, semaine du {monday}, source {uuid} (id_source {src})")
+    ts = int(datetime(saturday.year, saturday.month, saturday.day,
+                      tzinfo=timezone.utc).timestamp())
+    params = {"src": src, "ts": ts, "re": FQDN_RE}
+    print(f"{typ}, semaine du samedi {saturday} (creation_date {ts}), "
+          f"source {uuid} (id_source {src})")
 
     def cmd(sql: str):
         return client.command(sql, parameters=params, settings=SETTINGS)
@@ -212,11 +218,11 @@ def send_ranks(ranks, source_uuid: str, week=None, node_type: str = "fqdn") -> N
 
         # 6. historique, puis rank courant de la table du type (anyLast :
         # celui-ci remplace le précédent ; id inchangé, c'est déjà le min)
-        cmd("INSERT INTO rank (node_type, id_node, id_source, week, rank) "
-            f"SELECT '{typ}', id_node, {{src:Int32}}, {{week:Date}}, rank FROM stg_rank_ids")
+        cmd("INSERT INTO rank (node_type, id_node, id_source, creation_date, rank) "
+            f"SELECT '{typ}', id_node, {{src:Int32}}, {{ts:Int32}}, rank FROM stg_rank_ids")
         cmd(f"INSERT INTO {typ} (value, {idcol}, rank, version) "
             "SELECT value, id_node, rank, toUnixTimestamp(now()) FROM stg_rank_ids")
-        print(f"rank : {resolved:,} ranks {typ} pour la semaine du {monday}, "
+        print(f"rank : {resolved:,} ranks {typ} pour la semaine du samedi {saturday}, "
               f"rank de {typ} mis à jour, en {time.monotonic() - t:.0f} s")
     finally:
         for tbl in STAGING:
@@ -227,7 +233,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Ranks d'une semaine → table rank")
     ap.add_argument("file", help="CSV rank/valeur (.csv ou .csv.gz)")
     ap.add_argument("source_uuid")
-    ap.add_argument("--week", help="date du relevé, ramenée au lundi (défaut : aujourd'hui, UTC)")
+    ap.add_argument("--week", help="date du relevé, ramenée au samedi de sa semaine (défaut : aujourd'hui, UTC)")
     ap.add_argument("--type", default="fqdn", choices=sorted(RANKED),
                     help="type des nœuds classés (défaut : fqdn)")
     args = ap.parse_args()

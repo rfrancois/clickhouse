@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init migration migration-swap migration-nodes migration-nodes-swap migration-property migration-property-swap migration-property-int migration-link-int migration-rank migration-rank-nullable migration-rank-date upgrade generate test import ranks pdf down clean
+.PHONY: all up wait init upgrade generate test import ranks pdf down clean
 
 all: up wait init generate
 
@@ -16,64 +16,6 @@ wait:
 init:
 	$(CLIENT) < sql/02_optimized.sql
 	@echo "Schéma optimisé créé."
-
-# Base existante : link → AggregatingMergeTree (première date de détection
-# conservée). Copie dans link_new, link intacte ; relançable.
-migration:
-	$(CLIENT) < sql/06_migrate_link_copy.sql
-
-# Bascule vers link_new (ancienne gardée sous link_old_replacing), après
-# contrôle des comptes.
-migration-swap:
-	$(CLIENT) < sql/07_migrate_link_swap.sql
-
-# Base existante : les 9 tables de valeurs (fqdn, ip, application, ...) →
-# AggregatingMergeTree, une ligne par valeur (id le plus ancien conservé).
-# Copies dans <type>_new, tables intactes ; relançable.
-migration-nodes:
-	$(CLIENT) < sql/08_migrate_nodes_copy.sql
-
-# Bascule vers les <type>_new (anciennes gardées sous <type>_old_replacing),
-# après contrôle des comptes.
-migration-nodes-swap:
-	$(CLIENT) < sql/09_migrate_nodes_swap.sql
-
-# Base existante (après migration / migration-swap) : property +
-# property_detection → une seule property en AggregatingMergeTree (payload du
-# dernier insert, première date de détection). Copie dans property_new ;
-# relançable.
-migration-property:
-	$(CLIENT) < sql/10_migrate_property_copy.sql
-
-# Bascule vers property_new (anciennes gardées sous property_old_replacing et
-# property_detection_old), après contrôle des comptes.
-migration-property-swap:
-	$(CLIENT) < sql/11_migrate_property_swap.sql
-
-# Base dont property est déjà en AggregatingMergeTree avec detection_date en
-# DateTime : passage en Int32 (timestamp Unix), en place (ALTER).
-migration-property-int:
-	$(CLIENT) < sql/12_migrate_property_detection_int.sql
-
-# Base dont link.detection_date est en UInt64 : passage en Int32 (comme
-# property), en place (ALTER).
-migration-link-int:
-	$(CLIENT) < sql/13_migrate_link_detection_int.sql
-
-# Base existante : création de la table rank (déjà créée par make init),
-# aucune autre table touchée ; relançable.
-migration-rank:
-	$(CLIENT) < sql/14_create_rank.sql
-
-# Base existante : fqdn.rank / ip.rank Int32 → Nullable(Int32), en place
-# (ALTER) ; 1000000 / 1000001 (rank inconnu) → NULL.
-migration-rank-nullable:
-	$(CLIENT) < sql/15_migrate_rank_nullable.sql
-
-# Base dont rank a encore week (Date, lundi) : → creation_date (timestamp
-# Int32, samedi). Copie + échange (ancienne gardée sous rank_old_week).
-migration-rank-date:
-	$(CLIENT) < sql/16_migrate_rank_creation_date.sql
 
 # Mise à jour de ClickHouse vers la version de docker-compose.yml (volume conservé)
 upgrade:

@@ -24,26 +24,6 @@ make init         # crée le schéma optimisé
 make generate     # insère 500k FQDN / 500k IP / 1M liens factices
 make test         # test rapide : LIKE + jointure sur les tables optimisées
 make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
-make migration    # base existante : copie link → link_new (AggregatingMergeTree)
-                  # et property.detection_date → property_detection
-make migration-swap  # bascule link ↔ link_new (ancienne : link_old_replacing)
-                     # et supprime property.detection_date
-make migration-nodes  # base existante : copie les 9 tables de valeurs → <type>_new
-                      # (AggregatingMergeTree, une ligne par valeur)
-make migration-nodes-swap  # bascule <type> ↔ <type>_new (anciennes : <type>_old_replacing)
-make migration-property  # après migration-swap : property + property_detection
-                         # → property_new (AggregatingMergeTree)
-make migration-property-swap  # bascule property ↔ property_new (anciennes :
-                              # property_old_replacing, property_detection_old)
-make migration-property-int  # property déjà migrée : detection_date DateTime
-                             # → Int32 (timestamp Unix), en place
-make migration-link-int  # link.detection_date UInt64 → Int32 (comme property),
-                         # en place
-make migration-rank  # base existante : crée la table rank
-make migration-rank-nullable  # base existante : fqdn.rank / ip.rank → Nullable,
-                              # 1000000 / 1000001 → NULL, en place
-make migration-rank-date  # rank.week (Date, lundi) → creation_date (timestamp,
-                          # samedi) ; ancienne table gardée sous rank_old_week
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
@@ -187,8 +167,7 @@ WHERE r.node_type = 'fqdn'
 ORDER BY r.id_source, r.creation_date;
 ```
 
-Un seul `make ranks` à la fois. Base existante : `make migration-rank`
-(`sql/14_create_rank.sql`) avant le premier envoi.
+Un seul `make ranks` à la fois.
 
 ## Recherche `LIKE '%…%'` triée par rank
 
@@ -218,9 +197,7 @@ propres ids) fusionne avec la ligne existante, colonne par colonne :
 Lecture dédupliquée avant fusion : `FINAL`, ou `GROUP BY value` avec
 `min(id_<type>)` / `max(version)`. Les liens ou propriétés qui citent un id
 écarté deviennent orphelins après la fusion : l'import résout donc toujours
-une valeur vers `min(id)`. Migration d'une base existante :
-`make migration-nodes` puis `make migration-nodes-swap`
-(`sql/08_migrate_nodes_copy.sql`, `sql/09_migrate_nodes_swap.sql`).
+une valeur vers `min(id)`.
 
 ### Index texte exact
 
@@ -277,8 +254,7 @@ type de chaque extrémité :
   ré-envoi) et la plus récente `version` (`max`, date de mise à jour), quel
   que soit l'ordre d'insertion. Lecture dédupliquée : `FINAL`, ou
   `GROUP BY` avec `min(detection_date)` / `max(version)`.
-  `detection_date` : timestamp Unix en `Int32`, comme dans `property`
-  (`make migration-link-int` pour une base où elle est encore en `UInt64`) ;
+  `detection_date` : timestamp Unix en `Int32`, comme dans `property` ;
 - **pas de projection inverse** : chaque lien est inséré physiquement dans
   les deux sens (A→B et B→A) par l'import (`sql/05_import_distribute.sql`,
   `distribute_links()` dans `scripts/import_data.py`) et par `make generate`.
@@ -313,14 +289,6 @@ SELECT id_source, payload, version, toDateTime(detection_date) AS detection_date
 FROM property FINAL
 WHERE node_type = 'fqdn' AND id_node = 123456;
 ```
-
-Ancien schéma (`property` en `ReplacingMergeTree` + `property_detection`
-à part) : `make migration-property` puis `make migration-property-swap`
-(`sql/10_migrate_property_copy.sql`, `sql/11_migrate_property_swap.sql`),
-qui donnent directement `detection_date` en `Int32`. `property` déjà en
-`AggregatingMergeTree` avec `detection_date` en `DateTime` :
-`make migration-property-int` (`sql/12_migrate_property_detection_int.sql`,
-`ALTER` en place).
 
 ## Résultats historiques (dans `results/`)
 

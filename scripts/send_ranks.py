@@ -41,8 +41,7 @@ Tout se fait côté serveur, sans aller-retour des ids vers Python :
 Les tables stg_rank* sont supprimées à la fin.
 
 Un seul envoi à la fois (deux envois concurrents liraient le même
-max(id)). Prérequis : table rank (make init, ou make migration-rank sur une
-base existante).
+max(id)). Prérequis : table rank (make init).
 
 Dépendance : pip install clickhouse-connect
 """
@@ -132,7 +131,7 @@ def send_ranks(ranks, source_uuid: str, week=None, node_type: str = "fqdn") -> N
     client = clickhouse_connect.get_client(host=HOST, port=PORT,
                                            username=USER, password=PASSWORD)
     if not int(client.command("EXISTS TABLE rank")):
-        sys.exit("ERREUR : table rank absente (make migration-rank)")
+        sys.exit("ERREUR : table rank absente (make init)")
 
     uuid = norm_uuid(source_uuid)
     src = resolve_sources(client, {uuid}).get(uuid)

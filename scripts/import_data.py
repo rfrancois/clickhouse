@@ -479,17 +479,6 @@ def main() -> None:
         log("Tables optimisées absentes → création du schéma "
             "(sql/02_optimized.sql)...")
         run_sql_file(ROOT / "sql" / "02_optimized.sql")
-    elif query("SELECT engine FROM system.tables WHERE database = "
-               "currentDatabase() AND name = 'property'") != "AggregatingMergeTree":
-        sys.exit("Schéma antérieur à property en AggregatingMergeTree : lancer "
-                 "d'abord make migration-property puis make migration-property-swap "
-                 "(précédés de make migration / migration-swap si "
-                 "property_detection n'existe pas encore).")
-    elif "Int32" not in query("SELECT type FROM system.columns WHERE database = "
-                              "currentDatabase() AND table = 'property' "
-                              "AND name = 'detection_date'"):
-        sys.exit("property.detection_date encore en DateTime : lancer d'abord "
-                 "make migration-property-int.")
 
     files, tmp = collect_files(src)
     try:

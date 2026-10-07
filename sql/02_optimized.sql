@@ -13,7 +13,6 @@ DROP TABLE IF EXISTS phone;
 DROP TABLE IF EXISTS social_id;
 DROP TABLE IF EXISTS link;
 DROP TABLE IF EXISTS property;
-DROP TABLE IF EXISTS property_detection;
 DROP TABLE IF EXISTS rank;
 
 -- 1) Même schéma que la naïve (value String) + index de saut n-grammes :

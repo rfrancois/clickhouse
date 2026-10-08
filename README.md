@@ -220,7 +220,7 @@ Résultats (remplacés à chaque calcul complet) :
 
 | Table | Contenu |
 |---|---|
-| `classification_candidate` | couples (FQDN, plugin) proposés : `non_classe` (sans plugin), `conflit` (lié à un autre plugin que celui de ses pivots), `complement` (déjà lié, ex. à `zendesk`, nom de client = marque d'un autre plugin) |
+| `classification_candidate` | couples (FQDN, plugin) proposés : `non_classe` (sans plugin, voir filtre ci-dessous), `conflit` (lié à un autre plugin que celui de ses pivots), `complement` (déjà lié, ex. à `zendesk`, nom de client = marque d'un autre plugin) |
 | `classification_tenant` | tous les clients des plateformes : FQDN, plateforme, nom du client, nom générique ou non, plugins proposés, domaine de la marque, plugins déjà liés |
 | `classification_platform_detected` | plateformes détectées et leurs compteurs, pour revue (seuils en tête du script) |
 
@@ -242,6 +242,16 @@ Signaux, chacun propose des couples (FQDN, plugin) :
   de 2 (une IP seule ne suffit pas). Seuils, poids et labels techniques :
   constantes en tête du script.
 
+**Filtre `non_classe`** : un FQDN sans plugin n'est proposé que s'il n'a
+**aucune propriété**, ou si sa plus ancienne propriété
+(`min(detection_date)` dans `property`, toutes sources) date de **moins
+d'un an** (`MAX_PROPERTY_AGE_DAYS`). Un FQDN connu depuis longtemps et
+toujours sans plugin n'est pas proposé. Colonne `premiere_detection` :
+cette date (`NULL` sans propriété). Seule la date est lue, jamais le
+payload ; lecture par la clé primaire de `property`, pour les seuls
+candidats. Ne s'applique ni à `conflit` / `complement`, ni à
+`classification_tenant`, ni au mode `HOLDOUT` (qui mesure les signaux).
+
 Coût : une passe complète sur `fqdn` (ancêtre, nom de client, marque :
 recherches dans des tables `Join` en mémoire, sans jointure ni `GROUP BY`
 sur les 600M lignes) ; les sous-domaines de FQDN classifiés sont écrits
@@ -251,8 +261,8 @@ partition `fqdn` puis la table, une fois chacune. Mémoire :
 proportionnelle aux FQDN classifiés, marques, plateformes et pivots, pas
 aux 600M FQDN. Essai : 20M FQDN / 50M liens, 200k classifiés → 6 s.
 
-`property` n'est pas utilisé. Tables de données en lecture seule ; tables
-de travail `mc_*` supprimées à la fin.
+`property` ne sert qu'au filtre `non_classe` (date seulement). Tables de
+données en lecture seule ; tables de travail `mc_*` supprimées à la fin.
 
 ```sql
 SELECT fqdn, plugin, status, signals, anchor

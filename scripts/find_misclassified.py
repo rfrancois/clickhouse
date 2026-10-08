@@ -43,7 +43,11 @@ client est cherché entier, puis sa partie avant le premier « - »
 
 Résultats :
   classification_candidate  couples (FQDN, plugin) proposés
-    non_classe  FQDN sans plugin
+    non_classe  FQDN sans plugin, seulement s'il n'a aucune propriété ou
+                si sa plus ancienne propriété (min detection_date, table
+                property) date de moins de MAX_PROPERTY_AGE_DAYS jours :
+                un FQDN connu depuis longtemps et toujours sans plugin
+                n'est pas proposé
     conflit     FQDN lié à un autre plugin que celui de ses pivots
     complement  FQDN déjà lié (ex. à zendesk) dont le nom de client est la
                 marque d'un autre plugin
@@ -80,6 +84,9 @@ signaux suit l'ordre de tri (optimize_aggregation_in_order).
 combien sont retrouvés avec leur bon plugin (héritage implicite compris),
 au total et par signal. Les tables de résultats ne sont pas modifiées.
 
+Filtre sur l'âge des propriétés appliqué aux résultats seulement : le
+mode --holdout mesure les signaux sans ce filtre.
+
 Tout se fait côté serveur, tables de travail mc_* supprimées à la fin.
 Lecture seule sur les tables de données.
 
@@ -104,6 +111,7 @@ PLATFORM_MIN_PLUGINS = 10     # plugins distincts parmi les clients d'une platef
 PLATFORM_MIN_DIVERSITY = 0.5  # plugins distincts par client (1 = un plugin par client)
 PLATFORM_MIN_RATIO = 0.05     # noms de clients = marque, parmi les noms distincts
 GENERIC_MIN_DOMAINS = 20      # nom présent sous autant de domaines → générique
+MAX_PROPERTY_AGE_DAYS = 365   # non_classe : plus ancienne propriété plus récente que ça
 # labels qui ne sont jamais un nom de client ni une marque
 TECH_LABELS = (
     "www", "www1", "www2", "www3", "m", "mobile", "mail", "webmail", "smtp", "imap",
@@ -118,7 +126,8 @@ TECH_LABELS = (
 STAGING = ("mc_classified", "mc_hidden", "mc_own", "mc_cls_value", "mc_anchor",
            "mc_brand", "mc_ancestor", "mc_generic", "mc_platform_stat", "mc_platform",
            "mc_plugin_name", "mc_pivot_vote", "mc_pivot_direct", "mc_pivot_degree",
-           "mc_pivot_label", "mc_pivot_signal", "mc_signal", "mc_candidate")
+           "mc_pivot_label", "mc_pivot_signal", "mc_signal", "mc_candidate",
+           "mc_first")
 SETTINGS = {"use_skip_indexes": 0}
 # même Enum8 que link.type_1 / type_2 : jointures et IN sur la clé primaire
 # de link sans conversion
@@ -144,7 +153,7 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
               "sig": list(WEIGHTS), "w": list(WEIGHTS.values()),
               "tech": list(TECH_LABELS), "plat_plugins": PLATFORM_MIN_PLUGINS,
               "plat_div": PLATFORM_MIN_DIVERSITY, "plat_ratio": PLATFORM_MIN_RATIO,
-              "generic": GENERIC_MIN_DOMAINS}
+              "generic": GENERIC_MIN_DOMAINS, "max_age": MAX_PROPERTY_AGE_DAYS}
 
     def cmd(sql: str, **settings):
         return client.command(sql, parameters=params, settings={**SETTINGS, **settings})
@@ -395,22 +404,45 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             evaluate(client, params)
             return
 
-        # 7. résultats. Valeur du FQDN déjà connue par l'ancêtre ; recherche
-        #    dans fqdn (projection p_id) pour les seuls candidats des pivots
+        # 7. résultats. mc_first : plus ancienne détection (property) des
+        #    FQDN non classés proposés, par la clé primaire de property
+        #    (node_type, id_node) ; non_classe gardé sans propriété ou si elle
+        #    a moins de MAX_PROPERTY_AGE_DAYS jours. Valeur du FQDN déjà
+        #    connue par l'ancêtre ; recherche dans fqdn (projection p_id)
+        #    pour les seuls candidats des pivots
+        cmd("CREATE TABLE mc_first (id_fqdn Int64, first Int32, found UInt8) "
+            "ENGINE = Join(ANY, LEFT, id_fqdn)")
+        cmd("INSERT INTO mc_first "
+            "SELECT id_node, min(detection_date), 1 FROM property "
+            "WHERE node_type = 'fqdn' AND id_node IN ("
+            " SELECT id_fqdn FROM mc_candidate WHERE status = 'non_classe') "
+            "GROUP BY id_node")
         cmd("CREATE OR REPLACE TABLE classification_candidate ("
             " id_fqdn Int64, fqdn String, id_plugin Int64, plugin String,"
             f" status {STATUS}, score UInt8,"
             " signals Array(LowCardinality(String)), anchor String, nb_pivots UInt64,"
-            " computed_at DateTime) "
+            " premiere_detection Nullable(DateTime), computed_at DateTime) "
             "ENGINE = MergeTree ORDER BY (plugin, status, fqdn)")
         cmd("INSERT INTO classification_candidate "
             "SELECT c.id_fqdn, if(c.fqdn != '', c.fqdn, f.fqdn), c.id_plugin, "
             "       joinGet('mc_plugin_name', 'value', c.id_plugin), "
-            "       c.status, c.score, c.signals, c.anchor, c.nb_pivots, now() "
+            "       c.status, c.score, c.signals, c.anchor, c.nb_pivots, "
+            "       if(joinGet('mc_first', 'found', c.id_fqdn) = 1,"
+            "          toDateTime(joinGet('mc_first', 'first', c.id_fqdn)), NULL), now() "
             "FROM mc_candidate AS c "
             "LEFT JOIN (SELECT id_fqdn, any(value) AS fqdn FROM fqdn"
             "           WHERE id_fqdn IN (SELECT id_fqdn FROM mc_candidate WHERE fqdn = '')"
-            "           GROUP BY id_fqdn) AS f ON f.id_fqdn = c.id_fqdn")
+            "           GROUP BY id_fqdn) AS f ON f.id_fqdn = c.id_fqdn "
+            "WHERE c.status != 'non_classe' "
+            "   OR joinGet('mc_first', 'found', c.id_fqdn) = 0 "
+            "   OR joinGet('mc_first', 'first', c.id_fqdn)"
+            "      >= toUnixTimestamp(now() - toIntervalDay({max_age:UInt32}))")
+        n_old = count("SELECT count() FROM mc_candidate WHERE status = 'non_classe' "
+                      "AND joinGet('mc_first', 'found', id_fqdn) = 1 "
+                      "AND joinGet('mc_first', 'first', id_fqdn)"
+                      "    < toUnixTimestamp(now() - toIntervalDay({max_age:UInt32}))")
+        step(f"non_classe écartés (plus ancienne propriété > {MAX_PROPERTY_AGE_DAYS} j) "
+             f": {n_old:,}")
         for status, n in client.query(
                 "SELECT status, count() FROM classification_candidate "
                 "GROUP BY status ORDER BY status").result_rows:

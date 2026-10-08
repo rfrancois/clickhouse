@@ -26,7 +26,7 @@ make test         # test rapide : LIKE + jointure sur les tables optimisées
 make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
-make misclassified [HOLDOUT=20]   # FQDN mal classifiés → classification_candidate
+make misclassified [HOLDOUT=20]   # FQDN mal classifiés, clients des plateformes
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -170,68 +170,91 @@ ORDER BY r.id_source, r.creation_date;
 
 Un seul `make ranks` à la fois.
 
-## FQDN mal classifiés (table `classification_candidate`)
+## FQDN mal classifiés et clients des plateformes
 
 ```bash
-make misclassified              # calcul complet → classification_candidate
+make misclassified              # calcul complet → tables classification_*
 make misclassified HOLDOUT=20   # évaluation : rappel sur 20 % de FQDN cachés
 ```
 
-Un FQDN est **classifié P** s'il a un lien `fqdn ↔ plugin P`. Le script
-(`scripts/find_misclassified.py`) cherche les FQDN qui devraient être liés
-à un plugin et ne le sont pas (`non_classe`), ou qui sont liés à un autre
-plugin que celui désigné par leurs voisins (`conflit`). Le nom du plugin
-n'est **jamais** comparé au nom du FQDN (`youtube.com` peut être `google`) :
-seuls comptent les FQDN déjà classifiés et le graphe `link`.
+Un FQDN est **classifié P** s'il a un lien `fqdn ↔ plugin P`. Le nom du
+plugin n'est **jamais** comparé au nom du FQDN (`youtube.com` peut être
+`google`) : seuls comptent les FQDN déjà classifiés et le graphe `link`
+(`scripts/find_misclassified.py`).
+
+**Héritage implicite** : un sous-domaine d'un FQDN classifié P est
+considéré comme P (`www.google.com` sous `google.com`) et n'est jamais
+signalé, sauf s'il est lié à un autre plugin (conflit).
+
+**Plateformes multi-clients** (`zendesk.com`, `slack.com`…) : leurs
+sous-domaines sont des clients (`monapp.zendesk.com`). Le nom du client
+(`monapp`, label juste avant la plateforme, hors labels techniques `www`,
+`api`, `mail`…) est listé, et s'il est la **marque** d'un domaine classifié
+(`monapp.com` → plugin `monapp`), ce plugin est proposé. Marque = premier
+label du domaine enregistrable, pour les seuls FQDN classifiés qui sont un
+domaine enregistrable ou son `www` ; nom de client cherché entier puis
+avant le premier `-` (`monapp-support` → `monapp`).
+
+Plateformes détectées automatiquement (aucune liste à maintenir) si :
+- au moins 3 sous-domaines classifiés, dont plus de la moitié dans
+  d'autres plugins (`x.amazonaws.com`, `y.amazonaws.com`…) ;
+- ou au moins 10 noms de clients qui sont une marque classifiée ailleurs,
+  soit au moins 5 % des noms de clients distincts.
+
+Résultats (remplacés à chaque calcul complet) :
+
+| Table | Contenu |
+|---|---|
+| `classification_candidate` | couples (FQDN, plugin) proposés : `non_classe` (sans plugin), `conflit` (lié à un autre plugin que son ancêtre ou ses pivots), `complement` (déjà lié, ex. à `zendesk`, nom de client = marque d'un autre plugin) |
+| `classification_tenant` | tous les clients des plateformes : FQDN, plateforme, nom du client, plugins proposés, domaine de la marque, plugins déjà liés |
+| `classification_platform_detected` | plateformes détectées et leurs compteurs, pour revue (seuils en tête du script) |
 
 Signaux, chacun propose des couples (FQDN, plugin) :
 
 | Signal | Principe | Poids |
 |---|---|---|
-| `ancestor` | plus proche ancêtre classifié : `coucou.youtube.com` hérite du plugin de `youtube.com` | 3 |
+| `ancestor` | FQDN lié à un autre plugin que son ancêtre classifié (hors plateforme) : conflit | 3 |
+| `tenant` | nom de client d'une plateforme = marque d'un domaine classifié | 2 |
 | `fqdn`, `application`, `capture` | pivot relié au FQDN et attribué au plugin | 2 |
 | `ip` | idem, signal faible (IP partagées) | 1 |
 
 - **pivot attribué à P** : lié lui-même au plugin P (lien `ip` /
   `application` / `capture ↔ plugin`, ou FQDN classifié P), ou au moins
-  3 FQDN classifiés parmi ses voisins dont 90 % dans P ;
-- **garde-fous** : pivot écarté au-delà de 1 000 FQDN voisins (CDN,
-  mutualisé) ; pivot direct ou ancêtre écarté si ses FQDN classifiés
-  (au moins 3) sont à moins de 50 % dans P (plateforme partagée :
-  `x.amazonaws.com`, `y.amazonaws.com`… classifiés chacun dans un plugin
-  différent n'héritent pas du plugin de `amazonaws.com`) ;
+  3 FQDN classifiés parmi ses voisins dont 90 % dans P ; écarté au-delà de
+  1 000 FQDN voisins (CDN, mutualisé), ou s'il est direct mais que ses FQDN
+  classifiés (au moins 3) sont à moins de 50 % dans P ; un plugin déjà
+  hérité de l'ancêtre n'est pas proposé ;
 - **score** = somme des poids des signaux distincts, couple gardé à partir
-  de 2 (une IP seule ne suffit pas). Seuils et poids : constantes en tête
-  du script.
+  de 2 (une IP seule ne suffit pas). Seuils, poids et labels techniques :
+  constantes en tête du script.
 
-Coût : une passe complète sur `fqdn` pour l'ancêtre (premier parent trouvé
-dans une table `Join` en mémoire, sans jointure ni `GROUP BY` sur les
-600M lignes), plus une lecture des FQDN classifiés par la projection
-`p_id`. `link` n'est lu que par sa clé primaire `(type_1, id_1)` (liens
-des FQDN classifiés, des pivots, du type `plugin`) ; si ces ids sont
-dispersés, cela revient à lire la partition `fqdn` puis la table, une fois
-chacune. Mémoire : proportionnelle aux FQDN classifiés et aux pivots
-(tables `Join`, ensembles `IN`), pas aux 600M FQDN ; regroupement final
-dans l'ordre de tri. Essai : 20M FQDN / 50M liens, 200k classifiés →
-5 s, 440 Mio au pic.
+Coût : une passe complète sur `fqdn` (ancêtre, nom de client, marque :
+recherches dans des tables `Join` en mémoire, sans jointure ni `GROUP BY`
+sur les 600M lignes) ; les sous-domaines de FQDN classifiés sont écrits
+sur disque (table de travail). `link` n'est lu que par sa clé primaire
+`(type_1, id_1)` ; si les ids sont dispersés, cela revient à lire la
+partition `fqdn` puis la table, une fois chacune. Mémoire :
+proportionnelle aux FQDN classifiés, marques, plateformes et pivots, pas
+aux 600M FQDN. Essai : 20M FQDN / 50M liens, 200k classifiés → 6 s.
 
 `property` n'est pas utilisé. Tables de données en lecture seule ; tables
-de travail `mc_*` supprimées à la fin ; `classification_candidate` est
-remplacée à chaque calcul complet.
+de travail `mc_*` supprimées à la fin.
 
 ```sql
-SELECT fqdn, status, score, signals, anchor
-FROM classification_candidate
-WHERE plugin = 'google'
-ORDER BY status, score DESC;
+SELECT fqdn, plugin, status, signals, anchor
+FROM classification_candidate WHERE plugin = 'google' ORDER BY status, fqdn;
+
+SELECT platform, tenant, fqdn, plugins_proposes, domaine_marque
+FROM classification_tenant WHERE platform = 'zendesk.com' ORDER BY tenant;
 ```
 
 **Évaluation** (`HOLDOUT=PCT`) : PCT % des FQDN classifiés sont cachés
 (tirage déterministe sur l'id), le calcul tourne sans eux, puis le script
-affiche, au total et par signal, combien sont retrouvés avec leur bon
-plugin (rappel) et la part des propositions justes sur ces FQDN
-(précision). `classification_candidate` n'est pas modifiée. Sert à régler
-seuils et poids sur les données réelles.
+affiche combien sont retrouvés avec leur bon plugin : par héritage
+implicite, par les candidats, au total et par signal (rappel), et la part
+des propositions justes sur ces FQDN (précision). Les tables de résultats
+ne sont pas modifiées. Sert à régler seuils et poids sur les données
+réelles.
 
 ## Recherche `LIKE '%…%'` triée par rank
 

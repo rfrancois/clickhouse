@@ -184,7 +184,10 @@ plugin n'est **jamais** comparé au nom du FQDN (`youtube.com` peut être
 
 **Héritage implicite** : un sous-domaine d'un FQDN classifié P est
 considéré comme P (`www.google.com` sous `google.com`) et n'est jamais
-signalé, sauf s'il est lié à un autre plugin (conflit).
+signalé. Un sous-domaine lié à un autre plugin que son ancêtre n'est pas un
+conflit : une marque est souvent découpée en plusieurs plugins
+(`teams.microsoft.com` classifié `teams` sous `microsoft.com` classifié
+`microsoft`).
 
 **Plateformes multi-clients** (`zendesk.com`, `slack.com`…) : leurs
 sous-domaines sont des clients (`monapp.zendesk.com`). Le nom du client
@@ -195,26 +198,37 @@ label du domaine enregistrable, pour les seuls FQDN classifiés qui sont un
 domaine enregistrable ou son `www` ; nom de client cherché entier puis
 avant le premier `-` (`monapp-support` → `monapp`).
 
-Plateformes détectées automatiquement (aucune liste à maintenir) si :
-- au moins 3 sous-domaines classifiés, dont plus de la moitié dans
-  d'autres plugins (`x.amazonaws.com`, `y.amazonaws.com`…) ;
-- ou au moins 10 noms de clients qui sont une marque classifiée ailleurs,
-  soit au moins 5 % des noms de clients distincts.
+Plateformes détectées automatiquement (aucune liste à maintenir). Ce
+qui distingue `zendesk.com` d'une grande marque découpée en plusieurs
+plugins (`microsoft.com` : `teams`, `azure`, `office`… sur des dizaines de
+sous-domaines) est la **diversité** : presque un plugin différent par
+client. Plateforme si :
+- ses sous-domaines classifiés dans d'autres plugins couvrent au moins
+  10 plugins distincts, soit au moins 0,5 plugin distinct par sous-domaine
+  (`x.amazonaws.com`, `y.amazonaws.com`… classifiés chacun ailleurs) ;
+- ou ses noms de clients qui sont une marque classifiée ailleurs
+  désignent au moins 10 plugins distincts, soit au moins 0,5 plugin par
+  nom, et ces noms font au moins 5 % des noms de clients distincts.
+
+**Noms génériques** : un nom de client présent sous au moins 20 domaines
+enregistrables classifiés différents (`data.microsoft.com`,
+`data.google.com`… : `data`, `cloud`, `news`…) n'est jamais utilisé comme
+marque, ni pour proposer un plugin (`data.gov` → `gov_us`), ni pour
+détecter une plateforme. Calculé sur les données, sans liste.
 
 Résultats (remplacés à chaque calcul complet) :
 
 | Table | Contenu |
 |---|---|
-| `classification_candidate` | couples (FQDN, plugin) proposés : `non_classe` (sans plugin), `conflit` (lié à un autre plugin que son ancêtre ou ses pivots), `complement` (déjà lié, ex. à `zendesk`, nom de client = marque d'un autre plugin) |
-| `classification_tenant` | tous les clients des plateformes : FQDN, plateforme, nom du client, plugins proposés, domaine de la marque, plugins déjà liés |
+| `classification_candidate` | couples (FQDN, plugin) proposés : `non_classe` (sans plugin), `conflit` (lié à un autre plugin que celui de ses pivots), `complement` (déjà lié, ex. à `zendesk`, nom de client = marque d'un autre plugin) |
+| `classification_tenant` | tous les clients des plateformes : FQDN, plateforme, nom du client, nom générique ou non, plugins proposés, domaine de la marque, plugins déjà liés |
 | `classification_platform_detected` | plateformes détectées et leurs compteurs, pour revue (seuils en tête du script) |
 
 Signaux, chacun propose des couples (FQDN, plugin) :
 
 | Signal | Principe | Poids |
 |---|---|---|
-| `ancestor` | FQDN lié à un autre plugin que son ancêtre classifié (hors plateforme) : conflit | 3 |
-| `tenant` | nom de client d'une plateforme = marque d'un domaine classifié | 2 |
+| `tenant` | nom de client d'une plateforme = marque d'un domaine classifié (hors nom générique) | 2 |
 | `fqdn`, `application`, `capture` | pivot relié au FQDN et attribué au plugin | 2 |
 | `ip` | idem, signal faible (IP partagées) | 1 |
 

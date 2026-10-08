@@ -9,17 +9,30 @@ seuls comptent les FQDN déjà classifiés et le graphe link.
 
 Héritage implicite : un sous-domaine d'un FQDN classifié P est considéré
 comme P (www.google.com sous google.com) ; ce plugin ne lui est jamais
-proposé.
+proposé. Un sous-domaine lié à un autre plugin que son ancêtre n'est pas un
+conflit (teams.microsoft.com classifié teams sous microsoft.com classifié
+microsoft : marque découpée en plusieurs plugins).
 
 Plateforme multi-clients (zendesk.com, slack.com...) : FQDN classifié dont
-les sous-domaines sont des clients (monapp.zendesk.com). Détectée
-automatiquement si au moins un des deux critères est rempli :
-  - au moins MIN_VOTES sous-domaines classifiés, dont plus de
-    1 - GUARD_PURITY dans d'autres plugins que la plateforme
+les sous-domaines sont des clients (monapp.zendesk.com). Ce qui la
+distingue d'une grande marque découpée en plusieurs plugins
+(teams.microsoft.com, azure.microsoft.com...) : la DIVERSITÉ, presque un
+plugin différent par client. Détectée automatiquement si au moins un des
+deux critères est rempli :
+  - ses sous-domaines classifiés dans d'autres plugins que la plateforme
+    couvrent au moins PLATFORM_MIN_PLUGINS plugins distincts, soit au moins
+    PLATFORM_MIN_DIVERSITY plugin distinct par sous-domaine
     (x.amazonaws.com, y.amazonaws.com... classifiés chacun ailleurs) ;
-  - au moins PLATFORM_MIN_BRAND noms de clients qui sont la marque d'un
-    domaine classifié ailleurs (acme.zendesk.com ↔ acme.com), soit au moins
-    PLATFORM_MIN_RATIO des noms de clients distincts.
+  - ses noms de clients qui sont la marque d'un domaine classifié ailleurs
+    (acme.zendesk.com ↔ acme.com) désignent au moins PLATFORM_MIN_PLUGINS
+    plugins distincts, soit au moins PLATFORM_MIN_DIVERSITY plugin par nom,
+    et ces noms font au moins PLATFORM_MIN_RATIO des noms de clients
+    distincts.
+Nom générique : nom de client (data, cloud, news...) trouvé comme marque et
+présent sous au moins GENERIC_MIN_DOMAINS domaines enregistrables
+classifiés différents (data.microsoft.com, data.google.com...) ; jamais
+utilisé comme marque (ni proposition, ni détection de plateforme). Calculé
+sur les données, pas de liste.
 Nom du client = label juste avant la plateforme (x.monapp.zendesk.com →
 monapp), sauf labels techniques (TECH_LABELS : www, api, mail...).
 Marque = premier label du domaine enregistrable, pour les seuls FQDN
@@ -31,8 +44,7 @@ client est cherché entier, puis sa partie avant le premier « - »
 Résultats :
   classification_candidate  couples (FQDN, plugin) proposés
     non_classe  FQDN sans plugin
-    conflit     FQDN lié à un autre plugin que son ancêtre classifié (hors
-                plateforme) ou que ses pivots
+    conflit     FQDN lié à un autre plugin que celui de ses pivots
     complement  FQDN déjà lié (ex. à zendesk) dont le nom de client est la
                 marque d'un autre plugin
   classification_tenant     tous les clients des plateformes : FQDN, nom
@@ -41,8 +53,6 @@ Résultats :
                             plateformes détectées et leurs compteurs,
                             pour revue
 Signaux, chacun propose des couples (FQDN, plugin) :
-  ancestor     ancêtre classifié hors plateforme, FQDN lié à un autre plugin
-               (conflit seulement : sans plugin, le FQDN hérite)
   tenant       sous une plateforme, nom de client = marque d'un domaine
                classifié dans un autre plugin
   ip, application, capture, fqdn
@@ -83,15 +93,17 @@ import clickhouse_connect
 HOST, PORT, USER, PASSWORD = "localhost", 8123, "chuser", "Royal15Raccoon"
 
 PIVOTS = ("ip", "application", "capture", "fqdn")
-WEIGHTS = {"ancestor": 3, "tenant": 2, "fqdn": 2, "application": 2, "capture": 2,
+WEIGHTS = {"tenant": 2, "fqdn": 2, "application": 2, "capture": 2,
            "ip": 1}
 MIN_SCORE = 2
 MIN_VOTES = 3       # FQDN classifiés minimum pour qu'un pivot vote
 MIN_PURITY = 0.9    # part du plugin majoritaire pour un vote
 GUARD_PURITY = 0.5  # pivot direct écarté / plateforme détectée en dessous
 MAX_DEGREE = 1000   # FQDN voisins maximum d'un pivot
-PLATFORM_MIN_BRAND = 10    # noms de clients = marque d'un domaine classifié
-PLATFORM_MIN_RATIO = 0.05  # ... parmi les noms de clients distincts
+PLATFORM_MIN_PLUGINS = 10     # plugins distincts parmi les clients d'une plateforme
+PLATFORM_MIN_DIVERSITY = 0.5  # plugins distincts par client (1 = un plugin par client)
+PLATFORM_MIN_RATIO = 0.05     # noms de clients = marque, parmi les noms distincts
+GENERIC_MIN_DOMAINS = 20      # nom présent sous autant de domaines → générique
 # labels qui ne sont jamais un nom de client ni une marque
 TECH_LABELS = (
     "www", "www1", "www2", "www3", "m", "mobile", "mail", "webmail", "smtp", "imap",
@@ -104,7 +116,7 @@ TECH_LABELS = (
     "webdisk", "whm", "default", "web", "en", "fr", "de", "es", "it", "nl", "us",
     "eu", "uk")
 STAGING = ("mc_classified", "mc_hidden", "mc_own", "mc_cls_value", "mc_anchor",
-           "mc_brand", "mc_ancestor", "mc_platform_stat", "mc_platform",
+           "mc_brand", "mc_ancestor", "mc_generic", "mc_platform_stat", "mc_platform",
            "mc_plugin_name", "mc_pivot_vote", "mc_pivot_direct", "mc_pivot_degree",
            "mc_pivot_label", "mc_pivot_signal", "mc_signal", "mc_candidate")
 SETTINGS = {"use_skip_indexes": 0}
@@ -116,6 +128,9 @@ NODE_TYPE = ("Enum8('application' = 1, 'capture' = 2, 'fqdn' = 3, 'ip' = 4, "
 STATUS = "Enum8('non_classe' = 1, 'conflit' = 2, 'complement' = 3)"
 
 PIVOT_IN = ", ".join(f"'{p}'" for p in PIVOTS)
+# plugins de la marque du nom de client, sauf nom générique
+BRAND_PLUGINS = ("if(joinGet('mc_generic', 'generic', brand) = 1, "
+                 "CAST([] AS Array(Int64)), brand_plugins)")
 SCORE = ("arraySum(s -> transform(s, {sig:Array(String)}, {w:Array(UInt8)}, 0), "
          "signals)")
 
@@ -127,8 +142,9 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
               "min_purity": MIN_PURITY, "guard": GUARD_PURITY,
               "max_degree": MAX_DEGREE, "min_score": MIN_SCORE,
               "sig": list(WEIGHTS), "w": list(WEIGHTS.values()),
-              "tech": list(TECH_LABELS), "plat_brand": PLATFORM_MIN_BRAND,
-              "plat_ratio": PLATFORM_MIN_RATIO}
+              "tech": list(TECH_LABELS), "plat_plugins": PLATFORM_MIN_PLUGINS,
+              "plat_div": PLATFORM_MIN_DIVERSITY, "plat_ratio": PLATFORM_MIN_RATIO,
+              "generic": GENERIC_MIN_DOMAINS}
 
     def cmd(sql: str, **settings):
         return client.command(sql, parameters=params, settings={**SETTINGS, **settings})
@@ -229,28 +245,41 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             " ) WHERE anchor != ''"
             ")")
 
+        #    noms génériques : nom de client trouvé comme marque, présent sous
+        #    au moins GENERIC_MIN_DOMAINS domaines enregistrables classifiés
+        cmd("CREATE TABLE mc_generic (brand String, generic UInt8) "
+            "ENGINE = Join(ANY, LEFT, brand)")
+        cmd("INSERT INTO mc_generic "
+            "SELECT brand, 1 FROM mc_ancestor WHERE brand != '' GROUP BY brand "
+            "HAVING uniq(cutToFirstSignificantSubdomain(anchor)) >= {generic:UInt32}")
+
         #    plateformes : compteurs par ancêtre (uniq approché : mémoire fixe
-        #    par ancêtre)
+        #    par ancêtre ; plugins distincts exacts, peu nombreux)
         cmd("CREATE TABLE mc_platform_stat (anchor String, plugins Array(Int64), "
-            "nb_tenants UInt64, nb_brand UInt64, nb_classified UInt64, "
-            "nb_classified_other UInt64) ENGINE = MergeTree ORDER BY anchor")
+            "nb_tenants UInt64, nb_brand UInt64, nb_brand_plugins UInt64, "
+            "nb_classified UInt64, nb_classified_other UInt64, nb_plugins_other UInt64) "
+            "ENGINE = MergeTree ORDER BY anchor")
         cmd("INSERT INTO mc_platform_stat "
             "SELECT anchor, any(plugins), "
             "       uniqIf(tenant, NOT has({tech:Array(String)}, tenant)), "
-            "       uniqIf(tenant, notEmpty(brand_plugins)), "
+            f"       uniqIf(tenant, notEmpty({BRAND_PLUGINS})), "
+            f"       uniqExactArray({BRAND_PLUGINS}), "
             "       countIf(notEmpty(own)), "
-            "       countIf(notEmpty(own) AND NOT hasAny(own, plugins)) "
+            "       countIf(notEmpty(own) AND NOT hasAll(plugins, own)), "
+            "       uniqExactArray(arrayFilter(x -> NOT has(plugins, x), own)) "
             "FROM mc_ancestor GROUP BY anchor")
         cmd("CREATE TABLE mc_platform (anchor String, platform UInt8) "
             "ENGINE = Join(ANY, LEFT, anchor)")
         cmd("INSERT INTO mc_platform "
             "SELECT anchor, 1 FROM mc_platform_stat "
-            "WHERE (nb_classified >= {min_votes:UInt32}"
-            "       AND nb_classified_other / nb_classified > 1 - {guard:Float64})"
-            "   OR (nb_brand >= {plat_brand:UInt32}"
+            "WHERE (nb_plugins_other >= {plat_plugins:UInt32}"
+            "       AND nb_plugins_other / nb_classified_other >= {plat_div:Float64})"
+            "   OR (nb_brand_plugins >= {plat_plugins:UInt32}"
+            "       AND nb_brand_plugins / nb_brand >= {plat_div:Float64}"
             "       AND nb_brand / nb_tenants >= {plat_ratio:Float64})")
         step(f"ancêtre : {count('SELECT count() FROM mc_ancestor'):,} FQDN sous un "
-             f"FQDN classifié, {count('SELECT count() FROM mc_platform'):,} plateformes")
+             f"FQDN classifié, {count('SELECT count() FROM mc_generic'):,} noms "
+             f"génériques, {count('SELECT count() FROM mc_platform'):,} plateformes")
 
         # 3. pivots. Votes : liens des FQDN classifiés vers les pivots, lus
         #    côté fqdn (link a les deux sens : clé primaire type_1 = 'fqdn',
@@ -317,25 +346,18 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
                 "GROUP BY pivot_type ORDER BY pivot_type").result_rows) or "aucun"))
 
         # 5. signaux (FQDN, plugin, signal), sans les couples déjà liés.
-        #    ancestor : conflits seulement (FQDN classifié, aucun plugin de
-        #    son ancêtre, ancêtre hors plateforme). tenant : marque du nom de
-        #    client, sous une plateforme. Pivots : leurs liens seulement (clé
-        #    primaire), au plus MAX_DEGREE FQDN chacun, sans les plugins
-        #    hérités de l'ancêtre
+        #    tenant : marque du nom de client (hors nom générique), sous une
+        #    plateforme. Pivots : leurs liens seulement (clé primaire), au plus
+        #    MAX_DEGREE FQDN chacun, sans les plugins hérités de l'ancêtre
         cols = ("(id_fqdn Int64, id_plugin Int64, signal LowCardinality(String), "
                 "fqdn String, anchor String, nb_pivots UInt64) "
                 "ENGINE = MergeTree ORDER BY (id_fqdn, id_plugin)")
         cmd(f"CREATE TABLE mc_signal {cols}")
         cmd(f"CREATE TABLE mc_pivot_signal {cols}")
         cmd("INSERT INTO mc_signal "
-            "SELECT id_fqdn, id_plugin, 'ancestor', value, anchor, 0 "
-            "FROM mc_ancestor ARRAY JOIN plugins AS id_plugin "
-            "WHERE notEmpty(own) AND NOT hasAny(own, plugins) "
-            "AND joinGet('mc_platform', 'platform', anchor) = 0")
-        cmd("INSERT INTO mc_signal "
             "SELECT id_fqdn, id_plugin, 'tenant', value, anchor, 0 "
             "FROM mc_ancestor "
-            "ARRAY JOIN arrayFilter(x -> NOT has(own, x), brand_plugins) AS id_plugin "
+            f"ARRAY JOIN arrayFilter(x -> NOT has(own, x), {BRAND_PLUGINS}) AS id_plugin "
             "WHERE joinGet('mc_platform', 'platform', anchor) = 1")
         cmd("INSERT INTO mc_pivot_signal "
             "SELECT l.id_2, p.id_plugin, toString(p.pivot_type), '', '', uniqExact(l.id_1) "
@@ -397,13 +419,14 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
         #    clients des plateformes (hors labels techniques), plateformes
         cmd("CREATE OR REPLACE TABLE classification_tenant ("
             " id_fqdn Int64, fqdn String, platform String, tenant String,"
-            " plugins_proposes Array(String), domaine_marque String,"
+            " nom_generique UInt8, plugins_proposes Array(String), domaine_marque String,"
             " plugins_lies Array(String), computed_at DateTime) "
             "ENGINE = MergeTree ORDER BY (platform, tenant, fqdn)")
         cmd("INSERT INTO classification_tenant "
             "SELECT id_fqdn, value, anchor, tenant, "
+            "       joinGet('mc_generic', 'generic', brand), "
             "       arrayMap(x -> joinGet('mc_plugin_name', 'value', x),"
-            "                arrayFilter(x -> NOT has(own, x), brand_plugins)), "
+            f"                arrayFilter(x -> NOT has(own, x), {BRAND_PLUGINS})), "
             "       if(brand != '', joinGet('mc_brand', 'domain', brand), ''), "
             "       arrayMap(x -> joinGet('mc_plugin_name', 'value', x), own), now() "
             "FROM mc_ancestor "
@@ -411,12 +434,14 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "AND NOT has({tech:Array(String)}, tenant)")
         cmd("CREATE OR REPLACE TABLE classification_platform_detected ("
             " platform String, plugins Array(String),"
-            " nb_tenants UInt64, nb_brand UInt64, nb_classified UInt64,"
-            " nb_classified_other UInt64, computed_at DateTime) "
+            " nb_tenants UInt64, nb_brand UInt64, nb_brand_plugins UInt64,"
+            " nb_classified UInt64, nb_classified_other UInt64, nb_plugins_other UInt64,"
+            " computed_at DateTime) "
             "ENGINE = MergeTree ORDER BY platform")
         cmd("INSERT INTO classification_platform_detected "
             "SELECT anchor, arrayMap(x -> joinGet('mc_plugin_name', 'value', x), plugins), "
-            "       nb_tenants, nb_brand, nb_classified, nb_classified_other, now() "
+            "       nb_tenants, nb_brand, nb_brand_plugins, nb_classified, "
+            "       nb_classified_other, nb_plugins_other, now() "
             "FROM mc_platform_stat WHERE joinGet('mc_platform', 'platform', anchor) = 1")
         n_ten = count("SELECT count() FROM classification_tenant")
         n_tm = count("SELECT countIf(notEmpty(plugins_proposes)) FROM classification_tenant")

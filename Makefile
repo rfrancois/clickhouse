@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init upgrade generate test import ranks misclassified pdf down clean
+.PHONY: all up wait init upgrade generate test import ranks misclassified graph pdf down clean
 
 all: up wait init generate
 
@@ -45,6 +45,10 @@ ranks: .venv
 # HOLDOUT facultatif : évaluation, % de FQDN classifiés cachés, rappel mesuré.
 misclassified:
 	$(PYTHON) scripts/find_misclassified.py $(if $(HOLDOUT),--holdout $(HOLDOUT))
+
+# Nébuleuse d'un FQDN (graphe des nœuds reliés) dans Streamlit
+graph:
+	$(PYTHON) -m streamlit run pages/nebuleuse.py
 
 pdf: .venv
 	$(PYTHON) scripts/make_pdf.py

@@ -27,6 +27,7 @@ make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
 make misclassified [HOLDOUT=20]   # FQDN mal classifiés, clients des plateformes
+make graph        # nébuleuse d'un FQDN dans Streamlit (http://localhost:8501)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -279,6 +280,48 @@ implicite, par les candidats, au total et par signal (rappel), et la part
 des propositions justes sur ces FQDN (précision). Les tables de résultats
 ne sont pas modifiées. Sert à régler seuils et poids sur les données
 réelles.
+
+## Nébuleuse d'un FQDN (graphe Streamlit)
+
+```bash
+pip install streamlit pyvis clickhouse-connect pandas
+make graph        # → http://localhost:8501
+```
+
+`pages/nebuleuse.py` est une **page Streamlit autonome** : la copier dans
+le dossier `pages/` d'une appli multipage existante suffit (aucun autre
+module du dépôt). Elle ne fixe pas `st.set_page_config` (laissé à l'appli)
+et préfixe ses clés de session par `neb_`. Connexion ClickHouse, première
+source trouvée : section `[clickhouse]` de `.streamlit/secrets.toml`
+(`host`, `port`, `username`, `password`, `database`), puis variables
+`CLICKHOUSE_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DATABASE`, puis
+les valeurs du banc d'essai. Ouvrir la page sur un nœud depuis ailleurs :
+URL `?value=google.com` (`&type=ip` pour un autre type), ou
+`st.session_state["neb_root"] = ("fqdn", "google.com")` puis
+`st.switch_page("pages/nebuleuse.py")`.
+
+Saisir un FQDN (ou un nœud d'un autre type) : la page parcourt `link` en largeur sur 1 à 4 sauts et affiche tout ce qui y est
+relié, disposé par forces (vis.js via pyvis). Couleur = type du nœud,
+taille = nombre de voisins (log), étoile = nœud de départ, losange = hub.
+Survol d'un nœud : valeur, rank, degré par type de voisin.
+
+Garde-fous (barre latérale) :
+- **voisins max par nœud et par type** (30) : les plus vus (nombre de
+  sources, puis première détection) ; le degré complet reste affiché ;
+- **hub** (500 voisins) : nœud affiché mais pas développé (IP de CDN,
+  hébergeur mutualisé), seuls ses liens vers les nœuds déjà présents
+  sont gardés ; le nœud de départ est toujours développé ;
+- **nœuds max** (1 500) : au-delà, le graphe est tronqué (signalé).
+
+Les nœuds du dernier niveau ne sont pas développés, mais une dernière
+requête lit leur degré et, en option, les liens entre nœuds déjà présents
+(amas). « Recentrer sur » relance le parcours depuis un nœud du graphe ;
+tables et CSV des nœuds et des liens en bas de page.
+
+Coût : une requête par niveau sur la clé primaire de `link`
+`(type_1, id_1)` (chaque lien existe dans les deux sens), puis une par type
+pour les valeurs (projection `p_id`). Essai : profondeur 3, 365 nœuds,
+0,4 s. Lecture seule ; résultats en cache 10 min.
 
 ## Recherche `LIKE '%…%'` triée par rank
 

@@ -306,12 +306,32 @@ taille = nombre de voisins (log), étoile = nœud de départ, losange = hub.
 Survol d'un nœud : valeur, rank, degré par type de voisin.
 
 Garde-fous (barre latérale) :
-- **voisins max par nœud et par type** (30) : les plus vus (nombre de
-  sources, puis première détection) ; le degré complet reste affiché ;
+- **voisins max par nœud et par type** (20) : les plus importants, selon
+  le nombre de liens du **voisin lui-même** (lu dans `link`) ;
+  le degré complet reste affiché. Priorité au choix :
+
+  | Priorité | Voisins gardés d'abord |
+  |---|---|
+  | `reliés` (défaut) | ceux qui ont d'autres liens sans être des hubs : ce qui structure la nébuleuse ; culs-de-sac et IP de CDN en dernier |
+  | `exclusifs` | ceux qui n'ont presque que ce lien |
+  | `sources` | liens vus par le plus de sources |
+
+  Candidats évalués : au plus 10 000 par niveau (`POOL_BUDGET`), les plus
+  vus, à égalité tirés au hasard (hash de l'id) ; le nœud de départ a le
+  plus large échantillon. Essai : `google.com` avec 20 000 sous-domaines
+  sans autre lien, 500 sites reliés entre eux et 5 IP de CDN → `reliés`
+  garde les sites et écarte les CDN, 0,4 s ;
 - **hub** (500 voisins) : nœud affiché mais pas développé (IP de CDN,
   hébergeur mutualisé), seuls ses liens vers les nœuds déjà présents
   sont gardés ; le nœud de départ est toujours développé ;
-- **nœuds max** (1 500) : au-delà, le graphe est tronqué (signalé).
+- **nœuds max** (800) : au-delà, le graphe est tronqué (signalé) ;
+- **liens max** (2 000) : en plus des liens par lesquels chaque nœud a été
+  atteint, toujours gardés ; les autres (entre nœuds déjà présents) les
+  plus vus d'abord, le reste masqué (signalé).
+
+La physique est coupée une fois la disposition stabilisée (« Figer après
+stabilisation ») : le graphe ne tremble plus et ne charge plus le
+navigateur.
 
 Les nœuds du dernier niveau ne sont pas développés, mais une dernière
 requête lit leur degré et, en option, les liens entre nœuds déjà présents
@@ -319,8 +339,9 @@ requête lit leur degré et, en option, les liens entre nœuds déjà présents
 tables et CSV des nœuds et des liens en bas de page.
 
 Coût : une requête par niveau sur la clé primaire de `link`
-`(type_1, id_1)` (chaque lien existe dans les deux sens), puis une par type
-pour les valeurs (projection `p_id`). Essai : profondeur 3, 365 nœuds,
+`(type_1, id_1)` (chaque lien existe dans les deux sens, nombre de liens
+des candidats compris), puis une par type pour les valeurs (projection
+`p_id`). Essai : profondeur 3, 365 nœuds,
 0,4 s. Lecture seule ; résultats en cache 10 min.
 
 ## Recherche `LIKE '%…%'` triée par rank

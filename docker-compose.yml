@@ -11,6 +11,7 @@ services:
       CLICKHOUSE_USER: chuser
       CLICKHOUSE_PASSWORD: Royal15Raccoon
       CLICKHOUSE_DB: default
+      # CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ulimits:
       nofile:
         soft: 262144
@@ -18,6 +19,22 @@ services:
     volumes:
       - ch_data:/var/lib/clickhouse
       # - ./docker/low-memory.xml:/etc/clickhouse-server/config.d/low-memory.xml:ro
+
+  streamlit:
+    build:
+      context: ./streamlit
+      dockerfile: ./Dockerfile
+      args:
+        PROXY_HTTP: "http://proxy.foret:3128"
+        PROXY_HTTPS: "http://proxy.foret:3128"
+    container_name: streamlit
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "${HTTP_PORT}:8501"
+    volumes:
+      - ./streamlit:/app
+
 
 volumes:
   ch_data:

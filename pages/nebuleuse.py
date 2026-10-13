@@ -86,6 +86,11 @@ PRIORITIES = {
     # liens vus par le plus de sources, sans regarder le voisin
     "sources": "sources",
 }
+# taille des nœuds : nombre de liens en base (degré, tous voisins) ou
+# nombre de liens affichés dans le graphe (place dans la nébuleuse)
+SIZE_BY = ("liens en base", "liens affichés")
+# étiquettes « importants » : les plus gros nœuds
+TOP_LABELS = 25
 COLORS = {"fqdn": "#4f9dff", "ip": "#ff8c42", "application": "#3ecf8e",
           "capture": "#c77dff", "plugin": "#ff4d6d", "organization_name": "#ffd166",
           "organization_id": "#e9c46a", "phone": "#06d6a0", "social_id": "#90e0ef"}
@@ -277,14 +282,23 @@ def build_graph(query, node_type: str, value: str, depth: int = 2, per_type: int
                           "hubs": sum(n["hub"] for n in nodes.values())}
 
 
-def to_html(nodes, edges, root, labels: str = "niveau ≤ 1", dark: bool = True,
-            height: int = 800, freeze: bool = True) -> str:
+def to_html(nodes, edges, root, labels: str = "importants", dark: bool = True,
+            height: int = 800, freeze: bool = True, size_by: str = SIZE_BY[0]) -> str:
     """Graphe vis.js (pyvis), disposition par forces : une nébuleuse.
+
+    Taille d'un nœud selon size_by, en log puis RELATIVE au graphe : du
+    moins relié (petit) au plus relié (gros), quels que soient les nombres
+    absolus ; l'étiquette suit. labels : « importants » (TOP_LABELS plus
+    gros nœuds), « niveau ≤ 1 », « toutes », « aucune » ; le nœud de départ
+    a toujours la sienne.
     freeze : physique coupée une fois la disposition stabilisée (le graphe
     ne tremble plus, le navigateur ne recalcule plus rien)."""
     bg = "#0e1117" if dark else "#ffffff"
     net = Network(height=f"{height}px", width="100%", bgcolor=bg,
                   font_color="#e6e6e6" if dark else "#222222", cdn_resources="in_line")
+    weight = {key: (n["shown"] if size_by == SIZE_BY[1] else sum(n["degree"].values()))
+              for key, n in nodes.items()}
+    top = set(sorted(weight, key=lambda k: -weight[k])[:TOP_LABELS])
     for key, n in nodes.items():
         t, i = key
         total = sum(n["degree"].values())
@@ -295,11 +309,12 @@ def to_html(nodes, edges, root, labels: str = "niveau ≤ 1", dark: bool = True,
         tip += [f"  {k} : {v:,}" for k, v in sorted(n["degree"].items(), key=lambda kv: -kv[1])]
         if n["hub"]:
             tip.append("hub : non développé")
-        show = labels == "toutes" or (labels == "niveau ≤ 1" and n["level"] <= 1)
+        show = (labels == "toutes" or (labels == "importants" and key in top)
+                or (labels == "niveau ≤ 1" and n["level"] <= 1))
         net.add_node(
             f"{t}:{i}", label=n["value"] if show or key == root else " ",
             title="\n".join(tip), color=COLORS.get(t, "#999999"),
-            size=40 if key == root else 8 + 4 * math.log10(1 + total),
+            value=math.log1p(weight[key]),
             shape="star" if key == root else ("diamond" if n["hub"] else "dot"),
             borderWidth=3 if key == root else 1)
     for (a, b), e in edges.items():
@@ -314,7 +329,10 @@ def to_html(nodes, edges, root, labels: str = "niveau ≤ 1", dark: bool = True,
                                        "avoidOverlap": 0.3},
                   "stabilization": {"iterations": 400, "updateInterval": 50}},
       "layout": {"improvedLayout": false},
-      "nodes": {"font": {"size": 12}},
+      "nodes": {"font": {"size": 12},
+                "scaling": {"min": 5, "max": 55,
+                            "label": {"enabled": true, "min": 10, "max": 32,
+                                      "drawThreshold": 5, "maxVisible": 40}}},
       "edges": {"smooth": false},
       "interaction": {"hover": true, "tooltipDelay": 100, "navigationButtons": true,
                       "hideEdgesOnDrag": true, "hideEdgesOnZoom": true}
@@ -406,8 +424,12 @@ with st.sidebar:
                            key="neb_types")
     close_leaves = st.checkbox("Liens entre feuilles", True, key="neb_close",
                                help="liens entre nœuds du dernier niveau (amas)")
-    labels = st.radio("Étiquettes", ("niveau ≤ 1", "toutes", "aucune"), horizontal=True,
-                      key="neb_labels")
+    size_by = st.radio("Taille des nœuds", SIZE_BY, key="neb_size_by",
+                       help="liens en base : nombre total de voisins du nœud ; "
+                            "liens affichés : ses liens dans ce graphe")
+    labels = st.radio("Étiquettes", ("importants", "niveau ≤ 1", "toutes", "aucune"),
+                      horizontal=True, key="neb_labels",
+                      help=f"importants : les {TOP_LABELS} plus gros nœuds")
     dark = st.checkbox("Fond sombre", True, key="neb_dark")
     freeze = st.checkbox("Figer après stabilisation", True, key="neb_freeze",
                          help="coupe l'animation une fois la disposition calculée")
@@ -446,7 +468,8 @@ if info["dropped_edges"]:
     st.caption(f"{info['dropped_edges']:,} liens secondaires masqués "
                f"(limite de {int(max_edges):,} liens).")
 
-graph_html = to_html(nodes, edges, info["root"], labels, dark, freeze=freeze)
+graph_html = to_html(nodes, edges, info["root"], labels, dark, freeze=freeze,
+                     size_by=size_by)
 if hasattr(st, "iframe"):
     st.iframe(graph_html, height=810)
 else:  # Streamlit plus ancien

@@ -302,7 +302,10 @@ URL `?value=google.com` (`&type=ip` pour un autre type), ou
 
 Saisir un FQDN (ou un nœud d'un autre type) : la page parcourt `link` en largeur sur 1 à 4 sauts et affiche tout ce qui y est
 relié, disposé par forces (vis.js via pyvis). Couleur = type du nœud,
-taille = nombre de voisins (log), étoile = nœud de départ, losange = hub.
+étoile = nœud de départ, losange = hub. **Taille** = nombre de liens du
+nœud en base (ou, au choix, de liens affichés dans le graphe), en log et
+**relative au graphe** : du moins relié au plus relié, l'étiquette suit ;
+étiquettes par défaut sur les 25 plus gros nœuds (`TOP_LABELS`).
 Survol d'un nœud : valeur, rank, degré par type de voisin.
 
 Garde-fous (barre latérale) :

@@ -243,14 +243,18 @@ Signaux, chacun propose des couples (FQDN, plugin) :
   de 2 (une IP seule ne suffit pas). Seuils, poids et labels techniques :
   constantes en tête du script.
 
-**Filtre `non_classe`** : un FQDN sans plugin n'est proposé que s'il n'a
-**aucune propriété**, ou si sa plus ancienne propriété
-(`min(detection_date)` dans `property`, toutes sources) date de **moins
-d'un an** (`MAX_PROPERTY_AGE_DAYS`). Un FQDN connu depuis longtemps et
-toujours sans plugin n'est pas proposé. Colonne `premiere_detection` :
-cette date (`NULL` sans propriété). Seule la date est lue, jamais le
-payload ; lecture par la clé primaire de `property`, pour les seuls
-candidats. Ne s'applique ni à `conflit` / `complement`, ni à
+**Filtre `non_classe`** : un FQDN sans plugin n'est proposé que si sa
+plus ancienne propriété (`min(detection_date)` dans `property`, toutes
+sources) date de **moins d'un an** (`MAX_PROPERTY_AGE_DAYS`), ou, s'il
+n'a **aucune propriété**, s'il a au moins un **lien** (`link`) ou un
+**rank** (table `rank`). Un FQDN connu depuis longtemps et toujours sans
+plugin n'est pas proposé, ni un FQDN dont on ne sait rien (ni propriété,
+ni lien, ni rank : en pratique un client de plateforme proposé par le
+seul signal `tenant`, les signaux de pivot impliquant un lien). Colonne
+`premiere_detection` : cette date (`NULL` sans propriété). Seule la date
+est lue, jamais le payload ; lecture par la clé primaire de `property`,
+`link` et `rank`, pour les seuls candidats. Base sans table `rank` (créée
+avant elle) : lien seul. Ne s'applique ni à `conflit` / `complement`, ni à
 `classification_tenant`, ni au mode `HOLDOUT` (qui mesure les signaux).
 
 Coût : une passe complète sur `fqdn` (ancêtre, nom de client, marque :
@@ -262,7 +266,8 @@ partition `fqdn` puis la table, une fois chacune. Mémoire :
 proportionnelle aux FQDN classifiés, marques, plateformes et pivots, pas
 aux 600M FQDN. Essai : 20M FQDN / 50M liens, 200k classifiés → 6 s.
 
-`property` ne sert qu'au filtre `non_classe` (date seulement). Tables de
+`property` et `rank` ne servent qu'au filtre `non_classe` (date /
+présence seulement). Tables de
 données en lecture seule ; tables de travail `mc_*` supprimées à la fin.
 
 ```sql

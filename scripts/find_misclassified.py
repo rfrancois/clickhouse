@@ -43,11 +43,13 @@ client est cherché entier, puis sa partie avant le premier « - »
 
 Résultats :
   classification_candidate  couples (FQDN, plugin) proposés
-    non_classe  FQDN sans plugin, seulement s'il n'a aucune propriété ou
-                si sa plus ancienne propriété (min detection_date, table
-                property) date de moins de MAX_PROPERTY_AGE_DAYS jours :
-                un FQDN connu depuis longtemps et toujours sans plugin
-                n'est pas proposé
+    non_classe  FQDN sans plugin, seulement si sa plus ancienne propriété
+                (min detection_date, table property) date de moins de
+                MAX_PROPERTY_AGE_DAYS jours, ou, sans propriété, s'il a au
+                moins un lien (link) ou un rank (table rank) : un FQDN
+                connu depuis longtemps et toujours sans plugin n'est pas
+                proposé, ni un FQDN dont on ne sait rien (ni propriété, ni
+                lien, ni rank)
     conflit     FQDN lié à un autre plugin que celui de ses pivots
     complement  FQDN déjà lié (ex. à zendesk) dont le nom de client est la
                 marque d'un autre plugin
@@ -84,8 +86,8 @@ signaux suit l'ordre de tri (optimize_aggregation_in_order).
 combien sont retrouvés avec leur bon plugin (héritage implicite compris),
 au total et par signal. Les tables de résultats ne sont pas modifiées.
 
-Filtre sur l'âge des propriétés appliqué aux résultats seulement : le
-mode --holdout mesure les signaux sans ce filtre.
+Filtres non_classe (âge des propriétés, lien ou rank) appliqués aux
+résultats seulement : le mode --holdout mesure les signaux sans eux.
 
 Tout se fait côté serveur, tables de travail mc_* supprimées à la fin.
 Lecture seule sur les tables de données.
@@ -127,7 +129,7 @@ STAGING = ("mc_classified", "mc_hidden", "mc_own", "mc_cls_value", "mc_anchor",
            "mc_brand", "mc_ancestor", "mc_generic", "mc_platform_stat", "mc_platform",
            "mc_plugin_name", "mc_pivot_vote", "mc_pivot_direct", "mc_pivot_degree",
            "mc_pivot_label", "mc_pivot_signal", "mc_signal", "mc_candidate",
-           "mc_first")
+           "mc_first", "mc_known")
 SETTINGS = {"use_skip_indexes": 0}
 # même Enum8 que link.type_1 / type_2 : jointures et IN sur la clé primaire
 # de link sans conversion
@@ -406,8 +408,11 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
 
         # 7. résultats. mc_first : plus ancienne détection (property) des
         #    FQDN non classés proposés, par la clé primaire de property
-        #    (node_type, id_node) ; non_classe gardé sans propriété ou si elle
-        #    a moins de MAX_PROPERTY_AGE_DAYS jours. Valeur du FQDN déjà
+        #    (node_type, id_node) ; non_classe gardé si elle a moins de
+        #    MAX_PROPERTY_AGE_DAYS jours. Sans propriété : gardé s'il a un
+        #    lien ou un rank. mc_known : candidats sans propriété ni signal de
+        #    pivot (nb_pivots = 0, sinon ils ont un lien par construction)
+        #    trouvés dans link ou rank, par leur clé primaire. Valeur du FQDN déjà
         #    connue par l'ancêtre ; recherche dans fqdn (projection p_id)
         #    pour les seuls candidats des pivots
         cmd("CREATE TABLE mc_first (id_fqdn Int64, first Int32, found UInt8) "
@@ -417,6 +422,21 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "WHERE node_type = 'fqdn' AND id_node IN ("
             " SELECT id_fqdn FROM mc_candidate WHERE status = 'non_classe') "
             "GROUP BY id_node")
+        orphans = ("SELECT id_fqdn FROM mc_candidate WHERE status = 'non_classe' "
+                   "AND nb_pivots = 0 AND joinGet('mc_first', 'found', id_fqdn) = 0")
+        cmd("CREATE TABLE mc_known (id_fqdn Int64, known UInt8) "
+            "ENGINE = Join(ANY, LEFT, id_fqdn)")
+        #    table rank absente (base créée avant elle) : lien seul
+        has_rank = count("SELECT count() FROM system.tables "
+                         "WHERE database = currentDatabase() AND name = 'rank'")
+        if not has_rank:
+            step("table rank absente : non_classe sans propriété gardés sur le lien seul")
+        cmd("INSERT INTO mc_known SELECT id, 1 FROM ("
+            f" SELECT id_1 AS id FROM link WHERE type_1 = 'fqdn' AND id_1 IN ({orphans})"
+            + (" UNION ALL"
+               f" SELECT id_node FROM rank WHERE node_type = 'fqdn' AND id_node IN ({orphans})"
+               if has_rank else "")
+            + ") GROUP BY id")
         cmd("CREATE OR REPLACE TABLE classification_candidate ("
             " id_fqdn Int64, fqdn String, id_plugin Int64, plugin String,"
             f" status {STATUS}, score UInt8,"
@@ -434,15 +454,19 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "           WHERE id_fqdn IN (SELECT id_fqdn FROM mc_candidate WHERE fqdn = '')"
             "           GROUP BY id_fqdn) AS f ON f.id_fqdn = c.id_fqdn "
             "WHERE c.status != 'non_classe' "
-            "   OR joinGet('mc_first', 'found', c.id_fqdn) = 0 "
-            "   OR joinGet('mc_first', 'first', c.id_fqdn)"
-            "      >= toUnixTimestamp(now() - toIntervalDay({max_age:UInt32}))")
+            "   OR if(joinGet('mc_first', 'found', c.id_fqdn) = 1,"
+            "         joinGet('mc_first', 'first', c.id_fqdn)"
+            "         >= toUnixTimestamp(now() - toIntervalDay({max_age:UInt32})),"
+            "         c.nb_pivots > 0 OR joinGet('mc_known', 'known', c.id_fqdn) = 1)")
         n_old = count("SELECT count() FROM mc_candidate WHERE status = 'non_classe' "
                       "AND joinGet('mc_first', 'found', id_fqdn) = 1 "
                       "AND joinGet('mc_first', 'first', id_fqdn)"
                       "    < toUnixTimestamp(now() - toIntervalDay({max_age:UInt32}))")
         step(f"non_classe écartés (plus ancienne propriété > {MAX_PROPERTY_AGE_DAYS} j) "
              f": {n_old:,}")
+        n_empty = count(f"SELECT count() FROM mc_candidate WHERE id_fqdn IN ({orphans}) "
+                        "AND joinGet('mc_known', 'known', id_fqdn) = 0")
+        step(f"non_classe écartés (ni propriété, ni lien, ni rank) : {n_empty:,}")
         for status, n in client.query(
                 "SELECT status, count() FROM classification_candidate "
                 "GROUP BY status ORDER BY status").result_rows:

@@ -19,7 +19,10 @@ pour des dizaines de plugins est un service partagé (SSO, CDN...).
 de classification_candidate → CSV (séparateur « ; ») avec une colonne
 verdict à remplir (OK / KO) et un commentaire.
 --verdicts CSV : explication de chaque couple jugé (tous si aucun ne l'est)
-et bilan OK / KO par signal → rapport Markdown à transmettre.
+et bilan → rapport Markdown à transmettre. Bilan : couples jugés encore
+dans classification_candidate (relancer find_misclassified.py après un
+changement de règles, puis le rapport sur le même CSV), puis OK / KO par
+signal.
 --anonymize : noms de plugins remplacés par un pseudonyme stable (même
 plugin → même pseudonyme, plugin_xxxxxx), y compris dans les FQDN et les
 commentaires des verdicts : cdnjs.cloudflare.com → cdnjs.plugin_f036f5.com.
@@ -121,8 +124,9 @@ class Explainer:
                            f"WHERE id_{kind} IN {{ids:Array(Int64)}} GROUP BY id_{kind}",
                            ids=list(ids)))
 
-    def pivots(self, ids) -> list:
-        """pivots du FQDN, degré, votes et plugins directs → attribution"""
+    def pivots(self, ids, own) -> list:
+        """pivots du FQDN, degré, votes (sans celui du FQDN : plugins own) et
+        plugins directs → attribution"""
         deg = {(str(t), i): d for t, i, d in self.q(
             "SELECT type_1, id_1, uniqExact(id_2) FROM link "
             "WHERE (type_1, id_1) IN (SELECT type_2, id_2 FROM link"
@@ -151,14 +155,14 @@ class Explainer:
                 direct[(str(t), i)].add(p)
         out = []
         for key, d in deg.items():
-            v = votes.get(key, Counter())
+            v = votes.get(key, Counter()) - Counter(own)  # positifs seuls
             total = sum(v.values())
             for p in set(v) | direct.get(key, set()):
                 n = v.get(p, 0)
                 purity = n / total if total else 1.0
                 is_direct = p in direct.get(key, set())
                 kept = d <= MAX_DEGREE and (
-                    (is_direct and (total < MIN_VOTES or purity >= GUARD_PURITY))
+                    (is_direct and (total == 0 or purity >= GUARD_PURITY))
                     or (n >= MIN_VOTES and purity >= MIN_PURITY))
                 out.append(dict(type=key[0], id=key[1], degree=d, plugin=p, n=n,
                                 total=total, purity=purity, direct=is_direct,
@@ -174,14 +178,17 @@ class Explainer:
         target = self.plugin_id.get(plugin)
         if not ids or not target:
             lines.append(f"introuvable : {'FQDN' if not ids else 'plugin'}\n")
-            return lines, set()
+            return lines, set(), False
         own = self.fqdn_plugins(ids)
         lines.append(f"- id_fqdn : {', '.join(map(str, sorted(ids)))} ; "
                      f"plugins liés : {self.names(own)}")
 
-        # ancêtre classifié le plus proche (héritage implicite)
+        # ancêtre classifié le plus proche (héritage implicite), jamais plus
+        # court que le domaine enregistrable (ni TLD ni suffixe public)
         labels = fqdn.split(".")
-        parents = [".".join(labels[i:]) for i in range(1, len(labels) - 1)]
+        reg = self.q("SELECT cutToFirstSignificantSubdomain({f:String})", f=fqdn)[0][0]
+        parents = [p for p in (".".join(labels[i:]) for i in range(1, len(labels) - 1))
+                   if len(p) >= len(reg)]
         anchor, inherited = "", set()
         if parents:
             pids = self.fqdn_ids(parents)
@@ -210,14 +217,18 @@ class Explainer:
                              + (" (nom générique)" if gen else "")
                              + (f", marque {self.mask(dom)} → {', '.join(map(self.pn, prop))}"
                                 if prop else ""))
+        proposed = False
         if "classification_candidate" in self.tables:
             for st, sc, sig, nb in self.q(
                     "SELECT status, score, signals, nb_pivots FROM classification_candidate "
                     "WHERE fqdn = {f:String} AND plugin = {p:String}", f=fqdn, p=plugin):
+                proposed = True
                 lines.append(f"- classification_candidate : {st}, score {sc}, "
                              f"signaux {', '.join(sig)}, {nb} pivots")
+            if not proposed:
+                lines.append("- classification_candidate : absent (plus proposé)")
 
-        piv, by_type, hubs = self.pivots(ids)
+        piv, by_type, hubs = self.pivots(ids, own)
         lines.append("- pivots du FQDN : " + (", ".join(
             f"{t} {n}" + (f" (dont {hubs[t]} > {MAX_DEGREE} FQDN, écartés)" if hubs[t] else "")
             for t, n in sorted(by_type.items())) or "aucun"))
@@ -233,10 +244,12 @@ class Explainer:
         score = {p: sum(WEIGHTS[s] for s in s_) for p, s_ in sig.items()}
         ranked = sorted(score, key=lambda p: (-score[p], self.plugin_name.get(p, "")))
         kept = [p for p in ranked if score[p] >= MIN_SCORE]
-        lines.append(f"- concurrence : proposé pour {len(kept)} plugin(s) (score >= {MIN_SCORE})"
+        tie = len(kept) > 1 and score[kept[0]] == score[kept[1]]
+        lines.append(f"- concurrence : {len(kept)} plugin(s) avec score >= {MIN_SCORE}"
                      + (" : " + ", ".join(f"{self.pn(self.plugin_name.get(p, str(p)))} {score[p]} "
                                           f"({'+'.join(sorted(sig[p]))})" for p in kept[:15])
-                        + (" ..." if len(kept) > 15 else "") if kept else ""))
+                        + (" ..." if len(kept) > 15 else "") if kept else "")
+                     + (" ; aucun retenu (ex aequo)" if tie else ""))
         signals = set().union(*(sig.get(i, set()) for i in target))
 
         mine = sorted((p for p in piv if p["plugin"] in target),
@@ -247,7 +260,7 @@ class Explainer:
         if mine:
             vals = {t: self.values(t, {p["id"] for p in mine[:DETAIL_MAX] if p["type"] == t})
                     for t in PIVOTS}
-            lines += ["| type | valeur | degré | direct | votes | classifiés | pureté "
+            lines += ["| type | valeur | degré | direct | votes | autres classifiés | pureté "
                       "| retenu | plugins des voisins |",
                       "|---|---|---:|:-:|---:|---:|---:|:-:|---|"]
             for p in mine[:DETAIL_MAX]:
@@ -260,7 +273,7 @@ class Explainer:
             if len(mine) > DETAIL_MAX:
                 lines.append(f"| ... | {len(mine) - DETAIL_MAX} autres | | | | | | | |")
         lines.append("")
-        return lines, signals
+        return lines, signals, proposed
 
 
 def sample(client, per_group: int, out) -> None:
@@ -278,11 +291,16 @@ def sample(client, per_group: int, out) -> None:
 def report(ex: Explainer, pairs, out) -> None:
     judged = [p for p in pairs if p[2]] or pairs
     by_signal, by_combo = defaultdict(Counter), defaultdict(Counter)
+    still, changed = Counter(), defaultdict(list)
     body = []
     for fqdn, plugin, verdict, comment in judged:
-        lines, signals = ex.explain(fqdn, plugin, verdict, comment)
+        lines, signals, proposed = ex.explain(fqdn, plugin, verdict, comment)
         body += lines
         if verdict in ("OK", "KO"):
+            still[verdict, proposed] += 1
+            if proposed == (verdict == "KO"):
+                changed["KO encore proposés" if proposed else "OK plus proposés"].append(
+                    f"{ex.mask(fqdn)} → {ex.pn(plugin)}")
             for s in signals or ["aucun"]:
                 by_signal[s][verdict] += 1
             by_combo["+".join(sorted(signals)) or "aucun"][verdict] += 1
@@ -290,6 +308,19 @@ def report(ex: Explainer, pairs, out) -> None:
     print(f"Paramètres : MIN_SCORE {MIN_SCORE}, poids {WEIGHTS}, MIN_VOTES {MIN_VOTES}, "
           f"MIN_PURITY {MIN_PURITY}, GUARD_PURITY {GUARD_PURITY}, MAX_DEGREE {MAX_DEGREE}"
           f"{', plugins anonymisés' if ex.anonymize else ''}\n", file=out)
+    if still:
+        # couples jugés encore dans classification_candidate (après un
+        # nouveau calcul de find_misclassified.py, règles modifiées)
+        ok, ko = still["OK", True], still["KO", True]
+        print("| verdict | jugés | encore proposés | plus proposés |\n|---|---:|---:|---:|",
+              file=out)
+        for v in ("OK", "KO"):
+            print(f"| {v} | {still[v, True] + still[v, False]} | {still[v, True]} "
+                  f"| {still[v, False]} |", file=out)
+        print("\nPrécision des couples encore proposés : "
+              + (f"{ok / (ok + ko):.0%}" if ok + ko else "-") + "\n", file=out)
+        for title, items in sorted(changed.items()):
+            print(f"{title} : " + ", ".join(items) + "\n", file=out)
     for title, tally in (("signal", by_signal), ("signaux (combinaison)", by_combo)):
         if tally:
             print(f"| {title} | OK | KO | précision |\n|---|---:|---:|---:|", file=out)

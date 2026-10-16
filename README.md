@@ -229,18 +229,26 @@ Signaux, chacun propose des couples (FQDN, plugin) :
 
 | Signal | Principe | Poids |
 |---|---|---|
-| `tenant` | nom de client d'une plateforme = marque d'un domaine classifié (hors nom générique) | 2 |
+| `tenant` | nom de client d'une plateforme = marque d'un domaine classifié (hors nom générique) ; ne suffit pas seul | 1 |
 | `fqdn`, `application`, `capture` | pivot relié au FQDN et attribué au plugin | 2 |
 | `ip` | idem, signal faible (IP partagées) | 1 |
 
 - **pivot attribué à P** : lié lui-même au plugin P (lien `ip` /
   `application` / `capture ↔ plugin`, ou FQDN classifié P), ou au moins
-  3 FQDN classifiés parmi ses voisins dont 90 % dans P ; écarté au-delà de
-  1 000 FQDN voisins (CDN, mutualisé), ou s'il est direct mais que ses FQDN
-  classifiés (au moins 3) sont à moins de 50 % dans P ; un plugin déjà
-  hérité de l'ancêtre n'est pas proposé ;
+  3 FQDN classifiés parmi ses voisins dont 90 % dans P. Voisins classifiés
+  comptés **sans le FQDN proposé** (il ne vote pas pour lui-même). Écarté
+  au-delà de 1 000 FQDN voisins (CDN, mutualisé), ou s'il est direct et que
+  ses autres FQDN classifiés sont à moins de 50 % dans P (une capture liée
+  à P dont le seul autre FQDN classifié est d'un autre plugin ne prouve
+  rien) ; un plugin déjà hérité de l'ancêtre n'est pas proposé ;
+- **ancêtre** : jamais plus court que le domaine enregistrable
+  (`www.gchq.gov.uk` n'hérite pas de `gov.uk`, qui n'est pas une
+  plateforme) ;
 - **score** = somme des poids des signaux distincts, couple gardé à partir
-  de 2 (une IP seule ne suffit pas). Seuils, poids et labels techniques :
+  de 2 (ni une IP seule, ni `tenant` seul) **et seulement s'il est le
+  meilleur score du FQDN, sans ex aequo** : un FQDN proposé à égalité pour
+  plusieurs plugins (serveur DNS, CDN, SSO, marque présente dans plusieurs
+  plugins) n'est proposé pour aucun. Seuils, poids et labels techniques :
   constantes en tête du script.
 
 **Filtre `non_classe`** : un FQDN sans plugin n'est proposé que si sa
@@ -300,8 +308,12 @@ python scripts/explain_candidate.py --sample 5 -o verdicts.csv   # 5 par (statut
 python scripts/explain_candidate.py --verdicts verdicts.csv --anonymize -o rapport.md
 ```
 
-Le rapport donne la précision OK / KO par signal et par combinaison de
-signaux, puis l'explication de chaque couple jugé. `--anonymize` remplace
+Le rapport donne d'abord, pour les couples jugés, combien sont encore
+dans `classification_candidate` (OK / KO encore proposés, précision) :
+après un changement de règles, relancer `find_misclassified.py` puis le
+rapport sur le même `verdicts.csv` mesure l'effet sur l'échantillon déjà
+jugé. Puis la précision OK / KO par signal et par combinaison de signaux,
+et l'explication de chaque couple jugé. `--anonymize` remplace
 les noms de plugins par un pseudonyme stable (`plugin_xxxxxx`), y compris
 dans les FQDN et les commentaires des verdicts (`cdnjs.cloudflare.com` →
 `cdnjs.plugin_f036f5.com`) ; les captures entières par `capture_xxxxxxxx` ;

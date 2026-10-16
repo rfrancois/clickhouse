@@ -67,11 +67,17 @@ Signaux, chacun propose des couples (FQDN, plugin) :
                    capture ↔ plugin, ou FQDN pivot classifié P)
                  - vote   : au moins MIN_VOTES FQDN classifiés parmi ses voisins,
                    dont au moins MIN_PURITY dans P
-               pivot écarté s'il a plus de MAX_DEGREE FQDN voisins (CDN,
-               mutualisé), ou s'il est direct mais que ses voisins classifiés
-               sont surtout d'autres plugins
-Score d'un couple = somme des poids de ses signaux distincts (WEIGHTS) ;
-gardé si score >= MIN_SCORE (une IP seule ne suffit pas).
+               voisins classifiés comptés SANS le FQDN proposé (il ne vote pas
+               pour lui-même). Pivot écarté s'il a plus de MAX_DEGREE FQDN
+               voisins (CDN, mutualisé), ou s'il est direct et que ses autres
+               voisins classifiés sont moins de GUARD_PURITY dans P (une
+               capture liée à P dont le seul autre FQDN classifié est d'un
+               autre plugin ne prouve rien)
+Score d'un couple = somme des poids de ses signaux distincts (WEIGHTS ;
+tenant seul ne suffit pas, une IP seule non plus) ; gardé si score >=
+MIN_SCORE ET si c'est le meilleur score du FQDN, sans ex aequo : un FQDN
+proposé à égalité pour plusieurs plugins (service partagé : DNS, CDN, SSO,
+marque présente dans plusieurs plugins) n'est proposé pour aucun.
 
 Volumétrie (600M FQDN, 1G liens) : une seule passe complète, sur fqdn
 (ancêtre, nom de client et marque : recherches dans des tables Join en
@@ -102,7 +108,7 @@ import clickhouse_connect
 HOST, PORT, USER, PASSWORD = "localhost", 8123, "chuser", "Royal15Raccoon"
 
 PIVOTS = ("ip", "application", "capture", "fqdn")
-WEIGHTS = {"tenant": 2, "fqdn": 2, "application": 2, "capture": 2,
+WEIGHTS = {"tenant": 1, "fqdn": 2, "application": 2, "capture": 2,
            "ip": 1}
 MIN_SCORE = 2
 MIN_VOTES = 3       # FQDN classifiés minimum pour qu'un pivot vote
@@ -223,7 +229,8 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
 
         #    UNE passe sur fqdn : premier parent présent dans mc_anchor = le
         #    plus proche (a.b.google.com → b.google.com, google.com ; jamais
-        #    le TLD seul) ; nom de client = label juste avant l'ancêtre ;
+        #    plus court que le domaine enregistrable : ni TLD ni suffixe
+        #    public, www.gchq.gov.uk n'hérite pas de gov.uk) ; nom de client = label juste avant l'ancêtre ;
         #    marque correspondante (nom entier, sinon partie avant le premier
         #    « - »), hors plugins de l'ancêtre. Pas de jointure ni de GROUP BY
         cmd("CREATE TABLE mc_ancestor (value String, id_fqdn Int64, anchor String, "
@@ -248,7 +255,8 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "           joinGet('mc_brand', 'plugins', head)) AS b2"
             " FROM ("
             "  SELECT value, id_fqdn, arrayFirst("
-            "    s -> notEmpty(joinGet('mc_anchor', 'plugins', s)),"
+            "    s -> length(s) >= length(cutToFirstSignificantSubdomain(value))"
+            "         AND notEmpty(joinGet('mc_anchor', 'plugins', s)),"
             "    arrayMap(i -> arrayStringConcat(arraySlice(p, i), '.'), range(2, length(p)))"
             "  ) AS anchor"
             "  FROM (SELECT value, id_fqdn, splitByChar('.', value) AS p FROM fqdn"
@@ -324,15 +332,15 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "AND type_2 = 'fqdn' "
             "GROUP BY type_1, id_1")
 
-        # 4. pivots attribués à un plugin (direct ou vote, filtres de degré
-        #    et de pureté)
+        # 4. pivots attribuables à un plugin : degré au plus MAX_DEGREE,
+        #    direct ou au moins MIN_VOTES votes. Pureté jugée à l'étape 5,
+        #    par FQDN proposé (sans son propre vote)
         cmd(f"CREATE TABLE mc_pivot_label (pivot_type {NODE_TYPE}, "
             "id_pivot Int64, id_plugin Int64, direct UInt8, n UInt64, "
-            "purity Float64, degree UInt64) "
+            "total UInt64, degree UInt64) "
             "ENGINE = MergeTree ORDER BY (pivot_type, id_pivot)")
         cmd("INSERT INTO mc_pivot_label "
-            "SELECT pivot_type, id_pivot, id_plugin, direct, n, "
-            "       if(total = 0, 1., n / total) AS purity, degree "
+            "SELECT pivot_type, id_pivot, id_plugin, direct, n, total, degree "
             "FROM ("
             " SELECT k.pivot_type AS pivot_type, k.id_pivot AS id_pivot,"
             "        k.id_plugin AS id_plugin, k.direct AS direct, k.n AS n,"
@@ -348,10 +356,8 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             " ) AS k INNER JOIN mc_pivot_degree AS g"
             "   ON g.pivot_type = k.pivot_type AND g.id_pivot = k.id_pivot"
             ") "
-            "WHERE degree <= {max_degree:UInt64} AND ("
-            " (direct AND (total < {min_votes:UInt32} OR purity >= {guard:Float64}))"
-            " OR (n >= {min_votes:UInt32} AND purity >= {min_purity:Float64}))")
-        step("pivots attribués : " + (", ".join(
+            "WHERE degree <= {max_degree:UInt64} AND (direct OR n >= {min_votes:UInt32})")
+        step("pivots attribuables : " + (", ".join(
             f"{t} {n:,}" for t, n in client.query(
                 "SELECT pivot_type, uniqExact(id_pivot) FROM mc_pivot_label "
                 "GROUP BY pivot_type ORDER BY pivot_type").result_rows) or "aucun"))
@@ -359,7 +365,10 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
         # 5. signaux (FQDN, plugin, signal), sans les couples déjà liés.
         #    tenant : marque du nom de client (hors nom générique), sous une
         #    plateforme. Pivots : leurs liens seulement (clé primaire), au plus
-        #    MAX_DEGREE FQDN chacun, sans les plugins hérités de l'ancêtre
+        #    MAX_DEGREE FQDN chacun, sans les plugins hérités de l'ancêtre.
+        #    Pureté sans le vote du FQDN proposé (rest = autres voisins
+        #    classifiés) : direct gardé si rest = 0 ou pureté >= GUARD_PURITY,
+        #    vote si n >= MIN_VOTES et pureté >= MIN_PURITY
         cols = ("(id_fqdn Int64, id_plugin Int64, signal LowCardinality(String), "
                 "fqdn String, anchor String, nb_pivots UInt64) "
                 "ENGINE = MergeTree ORDER BY (id_fqdn, id_plugin)")
@@ -371,20 +380,29 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             f"ARRAY JOIN arrayFilter(x -> NOT has(own, x), {BRAND_PLUGINS}) AS id_plugin "
             "WHERE joinGet('mc_platform', 'platform', anchor) = 1")
         cmd("INSERT INTO mc_pivot_signal "
-            "SELECT l.id_2, p.id_plugin, toString(p.pivot_type), '', '', uniqExact(l.id_1) "
-            "FROM link AS l INNER JOIN mc_pivot_label AS p "
-            "  ON p.pivot_type = l.type_1 AND p.id_pivot = l.id_1 "
-            "WHERE (l.type_1, l.id_1) IN (SELECT pivot_type, id_pivot FROM mc_pivot_label) "
-            "AND l.type_2 = 'fqdn' "
-            "AND NOT has(joinGet('mc_own', 'own', l.id_2), p.id_plugin) "
-            "GROUP BY l.id_2, p.id_plugin, p.pivot_type")
+            "SELECT id_fqdn, id_plugin, toString(pivot_type), '', '', uniqExact(id_pivot) "
+            "FROM ("
+            " SELECT l.id_2 AS id_fqdn, p.id_plugin AS id_plugin, p.pivot_type AS pivot_type,"
+            "        p.id_pivot AS id_pivot, p.direct AS direct, p.n AS n,"
+            "        joinGet('mc_own', 'own', l.id_2) AS own,"
+            "        greatest(toInt64(p.total) - length(own), 0) AS rest,"
+            "        if(rest = 0, 1., n / rest) AS purity"
+            " FROM link AS l INNER JOIN mc_pivot_label AS p"
+            "   ON p.pivot_type = l.type_1 AND p.id_pivot = l.id_1"
+            " WHERE (l.type_1, l.id_1) IN (SELECT pivot_type, id_pivot FROM mc_pivot_label)"
+            " AND l.type_2 = 'fqdn' AND NOT has(own, p.id_plugin)"
+            ") WHERE (direct AND (rest = 0 OR purity >= {guard:Float64}))"
+            "   OR (n >= {min_votes:UInt32} AND purity >= {min_purity:Float64}) "
+            "GROUP BY id_fqdn, id_plugin, pivot_type")
         cmd("INSERT INTO mc_signal SELECT * FROM mc_pivot_signal "
             "WHERE (id_fqdn, id_plugin) NOT IN ("
             " SELECT id_fqdn, arrayJoin(plugins) FROM mc_ancestor"
             " WHERE id_fqdn IN (SELECT id_fqdn FROM mc_pivot_signal))")
 
-        # 6. candidats : score suffisant. Regroupement dans l'ordre de tri de
-        #    mc_signal (pas de table de hachage sur tous les couples)
+        # 6. candidats : score suffisant et meilleur score du FQDN, sans ex
+        #    aequo (best, same : fenêtres par FQDN, et par FQDN et score).
+        #    Regroupement dans l'ordre de tri de mc_signal (pas de table de
+        #    hachage sur tous les couples)
         cmd("CREATE TABLE mc_candidate (id_fqdn Int64, id_plugin Int64, fqdn String, "
             f"status {STATUS}, score UInt8, "
             "signals Array(LowCardinality(String)), anchor String, nb_pivots UInt64) "
@@ -395,11 +413,14 @@ def find_misclassified(holdout: float = 0, database: str = "default") -> None:
             "               has(signals, 'tenant'), 'complement', 'conflit'), "
             "       score, signals, anchor, nb_pivots "
             "FROM ("
-            f" SELECT id_fqdn, id_plugin, groupUniqArray(signal) AS signals, {SCORE} AS score,"
-            "        anyIf(fqdn, fqdn != '') AS fqdn, anyIf(anchor, anchor != '') AS anchor,"
-            "        sum(nb_pivots) AS nb_pivots"
-            " FROM mc_signal GROUP BY id_fqdn, id_plugin"
-            ") WHERE score >= {min_score:UInt8}",
+            " SELECT *, max(score) OVER (PARTITION BY id_fqdn) AS best,"
+            "        count() OVER (PARTITION BY id_fqdn, score) AS same"
+            " FROM ("
+            f"  SELECT id_fqdn, id_plugin, groupUniqArray(signal) AS signals, {SCORE} AS score,"
+            "         anyIf(fqdn, fqdn != '') AS fqdn, anyIf(anchor, anchor != '') AS anchor,"
+            "         sum(nb_pivots) AS nb_pivots"
+            "  FROM mc_signal GROUP BY id_fqdn, id_plugin)"
+            ") WHERE score >= {min_score:UInt8} AND score = best AND same = 1",
             optimize_aggregation_in_order=1)
 
         if holdout:

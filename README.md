@@ -302,9 +302,14 @@ python scripts/explain_candidate.py --verdicts verdicts.csv --anonymize -o rappo
 
 Le rapport donne la précision OK / KO par signal et par combinaison de
 signaux, puis l'explication de chaque couple jugé. `--anonymize` remplace
-les valeurs des pivots (IP, applications, captures, FQDN voisins) par un
-pseudonyme stable ; le FQDN candidat, ses ancêtres et les plugins restent
-en clair.
+les noms de plugins par un pseudonyme stable (`plugin_xxxxxx`), y compris
+dans les FQDN et les commentaires des verdicts (`cdnjs.cloudflare.com` →
+`cdnjs.plugin_f036f5.com`) ; les captures entières par `capture_xxxxxxxx` ;
+IP et applications restent en clair. Nom cherché sans casse, tel quel et
+sans séparateurs ; un nom de moins de 4 caractères seulement entre
+séparateurs. Une abréviation (`nflxvideo.net` pour netflix) n'est pas
+reconnue. Correspondance dans `rapport.md.plugins.csv`, à garder (ne pas
+transmettre).
 
 ## Nébuleuse d'un FQDN (graphe Streamlit)
 

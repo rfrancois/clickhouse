@@ -20,13 +20,20 @@ de classification_candidate → CSV (séparateur « ; ») avec une colonne
 verdict à remplir (OK / KO) et un commentaire.
 --verdicts CSV : explication de chaque couple jugé (tous si aucun ne l'est)
 et bilan OK / KO par signal → rapport Markdown à transmettre.
---anonymize : valeurs des pivots (IP, applications, captures, FQDN voisins)
-remplacées par un pseudonyme stable (même valeur → même pseudonyme) ; le
-FQDN candidat, ses ancêtres et les noms de plugins restent en clair.
+--anonymize : noms de plugins remplacés par un pseudonyme stable (même
+plugin → même pseudonyme, plugin_xxxxxx), y compris dans les FQDN et les
+commentaires des verdicts : cdnjs.cloudflare.com → cdnjs.plugin_f036f5.com.
+Captures remplacées entières par un pseudonyme stable (capture_xxxxxxxx) ;
+IP et applications en clair. Nom cherché tel quel et
+sans séparateurs, sans casse ; nom de moins de MASK_MIN_LEN caractères
+seulement entre séparateurs (sinon « go » masquerait google). Un nom
+générique (mail, cloud...) est masqué partout. Avec -o, table de
+correspondance dans <sortie>.plugins.csv, à garder (ne pas transmettre).
 """
 import argparse
 import csv
 import hashlib
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -37,17 +44,30 @@ from find_misclassified import (GUARD_PURITY, HOST, MAX_DEGREE, MIN_PURITY,
                                 PORT, SETTINGS, USER, WEIGHTS)
 
 DETAIL_MAX = 30  # pivots détaillés par couple (les plus forts d'abord)
+MASK_MIN_LEN = 4  # --anonymize : nom plus court masqué seulement entre séparateurs
 
 
 class Explainer:
     def __init__(self, client, anonymize: bool):
         self.client = client
         self.anonymize = anonymize
+        self.pseudo = {}  # pseudonyme → nom de plugin (--anonymize)
         self.plugin_name = dict(self.q("SELECT id_plugin, any(value) FROM plugin "
                                        "GROUP BY id_plugin"))
         self.plugin_id = defaultdict(set)
         for i, name in self.plugin_name.items():
             self.plugin_id[name].add(i)
+        # --anonymize : noms de plugins (et variante sans séparateurs,
+        # « Microsoft Teams » → microsoftteams) cherchés dans les valeurs,
+        # les plus longs d'abord, en une passe insensible à la casse
+        self.variant = {}
+        for name in self.plugin_name.values():
+            for v in {name.lower(), re.sub(r"[^0-9a-z]", "", name.lower())}:
+                if v and len(self.variant.get(v, name)) >= len(name):
+                    self.variant[v] = name
+        self.mask_re = re.compile("|".join(
+            re.escape(v) if len(v) >= MASK_MIN_LEN else rf"(?<![0-9a-z]){re.escape(v)}(?![0-9a-z])"
+            for v in sorted(self.variant, key=len, reverse=True)), re.I) if self.variant else None
         self.tables = {r[0] for r in self.q(
             "SELECT name FROM system.tables WHERE database = currentDatabase()")}
 
@@ -55,12 +75,30 @@ class Explainer:
         return self.client.query(sql, parameters=params, settings=SETTINGS).result_rows
 
     def names(self, ids) -> str:
-        return ", ".join(sorted(self.plugin_name.get(i, str(i)) for i in ids)) or "aucun"
+        return ", ".join(sorted(self.pn(self.plugin_name.get(i, str(i))) for i in ids)) or "aucun"
 
-    def label(self, kind: str, value: str) -> str:
+    def pn(self, name: str) -> str:
+        """nom de plugin affiché : pseudonyme stable si --anonymize"""
         if not self.anonymize:
+            return name
+        alias = f"plugin_{hashlib.sha1(name.encode()).hexdigest()[:6]}"
+        self.pseudo[alias] = name
+        return alias
+
+    def mask(self, text: str) -> str:
+        """noms de plugins dans une valeur (FQDN, capture...) → pseudonymes"""
+        if not self.anonymize or not self.mask_re or not text:
+            return text
+        return self.mask_re.sub(lambda m: self.pn(self.variant[m.group().lower()]), text)
+
+    def value(self, kind: str, value: str) -> str:
+        """valeur d'un pivot affichée : --anonymize → capture pseudonymisée,
+        application en clair, FQDN et IP noms de plugins masqués"""
+        if not self.anonymize or kind == "application":
             return value
-        return f"{kind}_{hashlib.sha1(value.encode()).hexdigest()[:8]}"
+        if kind == "capture":
+            return f"capture_{hashlib.sha1(value.encode()).hexdigest()[:8]}"
+        return self.mask(value)
 
     def fqdn_ids(self, values) -> dict:
         """valeur → ids (plusieurs ids possibles avant fusion)"""
@@ -129,8 +167,9 @@ class Explainer:
         return out, Counter(t for t, _ in deg), hubs
 
     def explain(self, fqdn: str, plugin: str, verdict="", comment="") -> tuple:
-        lines = [f"## {fqdn} → {plugin}" + (f"  [{verdict}]" if verdict else "")
-                 + (f" — {comment}" if comment else ""), ""]
+        lines = [f"## {self.mask(fqdn)} → {self.pn(plugin)}"
+                 + (f"  [{verdict}]" if verdict else "")
+                 + (f" — {self.mask(comment)}" if comment else ""), ""]
         ids = self.fqdn_ids([fqdn]).get(fqdn)
         target = self.plugin_id.get(plugin)
         if not ids or not target:
@@ -150,7 +189,7 @@ class Explainer:
                 if pids.get(p) and (pl := self.fqdn_plugins(pids[p])):
                     anchor, inherited = p, pl
                     break
-        lines.append(f"- ancêtre classifié : {anchor or 'aucun'}"
+        lines.append(f"- ancêtre classifié : {self.mask(anchor) or 'aucun'}"
                      + (f" ({self.names(inherited)})" if anchor else ""))
         if anchor and "classification_platform_detected" in self.tables:
             plat = self.q("SELECT nb_tenants, nb_brand, nb_brand_plugins, nb_classified, "
@@ -167,9 +206,10 @@ class Explainer:
                     "SELECT tenant, nom_generique, plugins_proposes, domaine_marque "
                     "FROM classification_tenant WHERE fqdn = {f:String}", f=fqdn):
                 tenant_plugins |= {i for name in prop for i in self.plugin_id.get(name, ())}
-                lines.append(f"- client de plateforme : {t}"
+                lines.append(f"- client de plateforme : {self.mask(t)}"
                              + (" (nom générique)" if gen else "")
-                             + (f", marque {dom} → {', '.join(prop)}" if prop else ""))
+                             + (f", marque {self.mask(dom)} → {', '.join(map(self.pn, prop))}"
+                                if prop else ""))
         if "classification_candidate" in self.tables:
             for st, sc, sig, nb in self.q(
                     "SELECT status, score, signals, nb_pivots FROM classification_candidate "
@@ -194,14 +234,15 @@ class Explainer:
         ranked = sorted(score, key=lambda p: (-score[p], self.plugin_name.get(p, "")))
         kept = [p for p in ranked if score[p] >= MIN_SCORE]
         lines.append(f"- concurrence : proposé pour {len(kept)} plugin(s) (score >= {MIN_SCORE})"
-                     + (" : " + ", ".join(f"{self.plugin_name.get(p, p)} {score[p]} "
+                     + (" : " + ", ".join(f"{self.pn(self.plugin_name.get(p, str(p)))} {score[p]} "
                                           f"({'+'.join(sorted(sig[p]))})" for p in kept[:15])
                         + (" ..." if len(kept) > 15 else "") if kept else ""))
         signals = set().union(*(sig.get(i, set()) for i in target))
 
         mine = sorted((p for p in piv if p["plugin"] in target),
                       key=lambda p: (not p["kept"], not p["direct"], -p["n"], p["degree"]))
-        lines += ["", f"Pivots attribuables à {plugin} : {sum(p['kept'] for p in mine)} retenus "
+        lines += ["", f"Pivots attribuables à {self.pn(plugin)} : "
+                  f"{sum(p['kept'] for p in mine)} retenus "
                   f"sur {len(mine)}", ""]
         if mine:
             vals = {t: self.values(t, {p["id"] for p in mine[:DETAIL_MAX] if p["type"] == t})
@@ -210,9 +251,10 @@ class Explainer:
                       "| retenu | plugins des voisins |",
                       "|---|---|---:|:-:|---:|---:|---:|:-:|---|"]
             for p in mine[:DETAIL_MAX]:
-                v = vals[p["type"]].get(p["id"], f"id {p['id']}")
-                top = ", ".join(f"{self.plugin_name.get(i, i)} {n}" for i, n in p["top"])
-                lines.append(f"| {p['type']} | {self.label(p['type'], v)} | {p['degree']} "
+                v = self.value(p["type"], vals[p["type"]].get(p["id"], f"id {p['id']}"))
+                top = ", ".join(f"{self.pn(self.plugin_name.get(i, str(i)))} {n}"
+                                for i, n in p["top"])
+                lines.append(f"| {p['type']} | {v} | {p['degree']} "
                              f"| {'oui' if p['direct'] else ''} | {p['n']} | {p['total']} "
                              f"| {p['purity']:.0%} | {'oui' if p['kept'] else 'non'} | {top} |")
             if len(mine) > DETAIL_MAX:
@@ -247,7 +289,7 @@ def report(ex: Explainer, pairs, out) -> None:
     print("# Explication des candidats\n", file=out)
     print(f"Paramètres : MIN_SCORE {MIN_SCORE}, poids {WEIGHTS}, MIN_VOTES {MIN_VOTES}, "
           f"MIN_PURITY {MIN_PURITY}, GUARD_PURITY {GUARD_PURITY}, MAX_DEGREE {MAX_DEGREE}"
-          f"{', valeurs anonymisées' if ex.anonymize else ''}\n", file=out)
+          f"{', plugins anonymisés' if ex.anonymize else ''}\n", file=out)
     for title, tally in (("signal", by_signal), ("signaux (combinaison)", by_combo)):
         if tally:
             print(f"| {title} | OK | KO | précision |\n|---|---:|---:|---:|", file=out)
@@ -274,7 +316,7 @@ if __name__ == "__main__":
     ap.add_argument("--sample", type=int, metavar="N",
                     help="N candidats par (statut, signaux) → CSV à juger")
     ap.add_argument("--verdicts", metavar="CSV", help="CSV jugé (fqdn;plugin;...;verdict;commentaire)")
-    ap.add_argument("--anonymize", action="store_true", help="pseudonymes pour les valeurs des pivots")
+    ap.add_argument("--anonymize", action="store_true", help="pseudonymes pour les noms de plugins")
     ap.add_argument("-o", "--output", help="fichier de sortie (défaut : écran)")
     ap.add_argument("--database", default="default")
     args = ap.parse_args()
@@ -290,4 +332,10 @@ if __name__ == "__main__":
         else:
             pairs = (read_verdicts(args.verdicts) if args.verdicts
                      else [(args.fqdn, args.plugin, "", "")])
-            report(Explainer(client, args.anonymize), pairs, out)
+            ex = Explainer(client, args.anonymize)
+            report(ex, pairs, out)
+            if ex.pseudo and args.output:
+                with open(args.output + ".plugins.csv", "w", encoding="utf-8-sig",
+                          newline="") as f:
+                    csv.writer(f, delimiter=";").writerows(
+                        [("pseudonyme", "plugin"), *sorted(ex.pseudo.items())])

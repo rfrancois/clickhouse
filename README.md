@@ -286,6 +286,26 @@ des propositions justes sur ces FQDN (précision). Les tables de résultats
 ne sont pas modifiées. Sert à régler seuils et poids sur les données
 réelles.
 
+**Explication et verdicts** (`scripts/explain_candidate.py`, lecture
+seule, mêmes paramètres que `find_misclassified.py`) : pourquoi un couple
+est proposé (plugins liés, ancêtre classifié, plateforme, chaque pivot
+avec degré, direct / votes, pureté, retenu ou non) et « concurrence » :
+tous les plugins que ses pivots proposeraient pour ce FQDN (un FQDN
+proposé pour des dizaines de plugins est un service partagé).
+
+```bash
+python scripts/explain_candidate.py login.microsoftonline.com esri
+python scripts/explain_candidate.py --sample 5 -o verdicts.csv   # 5 par (statut, signaux)
+# remplir la colonne verdict (OK / KO) et le commentaire, puis :
+python scripts/explain_candidate.py --verdicts verdicts.csv --anonymize -o rapport.md
+```
+
+Le rapport donne la précision OK / KO par signal et par combinaison de
+signaux, puis l'explication de chaque couple jugé. `--anonymize` remplace
+les valeurs des pivots (IP, applications, captures, FQDN voisins) par un
+pseudonyme stable ; le FQDN candidat, ses ancêtres et les plugins restent
+en clair.
+
 ## Nébuleuse d'un FQDN (graphe Streamlit)
 
 ```bash

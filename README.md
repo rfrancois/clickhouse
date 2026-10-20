@@ -330,8 +330,11 @@ pip install streamlit pyvis clickhouse-connect pandas
 make graph        # → http://localhost:8501
 ```
 
-`pages/nebuleuse.py` est une **page Streamlit autonome** : la copier dans
-le dossier `pages/` d'une appli multipage existante suffit (aucun autre
+`streamlit/pages/nebuleuse.py` est une page de l'appli Streamlit du
+conteneur (`docker compose`, dossier `streamlit/` monté : un `git pull`
+suffit, sans reconstruire). `make graph` la lance seule, hors Docker, sur
+le ClickHouse de `localhost`. Page **autonome** : la copier dans le
+dossier `pages/` d'une autre appli multipage suffit aussi (aucun autre
 module du dépôt). Elle ne fixe pas `st.set_page_config` (laissé à l'appli)
 et préfixe ses clés de session par `neb_`. Connexion ClickHouse, première
 source trouvée : section `[clickhouse]` de `.streamlit/secrets.toml`

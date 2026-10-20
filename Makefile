@@ -48,7 +48,7 @@ misclassified:
 
 # Nébuleuse d'un FQDN (graphe des nœuds reliés) dans Streamlit
 graph:
-	$(PYTHON) -m streamlit run pages/nebuleuse.py
+	CLICKHOUSE_HOST=localhost $(PYTHON) -m streamlit run streamlit/pages/nebuleuse.py
 
 pdf: .venv
 	$(PYTHON) scripts/make_pdf.py

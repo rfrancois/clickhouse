@@ -149,18 +149,31 @@ def is_pattern(value: str) -> bool:
 
 
 def find_roots(query, node_type: str, pattern: str, limit: int):
-    """Motif LIKE (seul % est un joker, _ est littéral) → (ids, total) :
-    au plus limit nœuds, rank croissant (fqdn, ip) puis valeur. Seules les
-    MATCH_CAP premières lignes trouvées sont lues : total = MATCH_CAP veut
-    dire « au moins », et le classement ne porte alors que sur elles."""
+    """Motif LIKE (seul % est un joker, _ est littéral) → (ids, total,
+    reliés) : au plus limit nœuds, ceux qui ont des liens d'abord (un nœud
+    créé par make ranks n'en a souvent aucun : étoile seule), puis rank
+    croissant (fqdn, ip), nombre de liens, valeur. Liens comptés par la clé
+    primaire de link. Seules les MATCH_CAP premières lignes trouvées sont
+    lues : total = MATCH_CAP veut dire « au moins », et le classement ne
+    porte alors que sur elles."""
     like = pattern.replace("\\", "\\\\").replace("_", "\\_")
     rank = "anyLast(rank)" if node_type in RANKED else "NULL"
     rows = query(
-        f"SELECT min(id_{node_type}), {rank} AS r, value, count() OVER () FROM ("
-        f" SELECT * FROM {node_type} WHERE value LIKE {{p:String}} LIMIT {MATCH_CAP}"
-        f") GROUP BY value ORDER BY r ASC NULLS LAST, value LIMIT {int(limit)} "
-        f"SETTINGS max_execution_time = 30", {"p": like})
-    return [int(r[0]) for r in rows], int(rows[0][3]) if rows else 0
+        "WITH m AS ("
+        f" SELECT min(id_{node_type}) AS id, {rank} AS r, value FROM ("
+        f"  SELECT * FROM {node_type} WHERE value LIKE {{p:String}} LIMIT {MATCH_CAP}"
+        " ) GROUP BY value"
+        "), l AS ("
+        " SELECT id_1 AS id, count() AS n FROM link"
+        f" WHERE type_1 = '{node_type}' AND id_1 IN (SELECT id FROM m) GROUP BY id_1"
+        ") "
+        "SELECT m.id, count() OVER (), countIf(l.n > 0) OVER ()"
+        " FROM m LEFT JOIN l ON l.id = m.id"
+        f" ORDER BY (l.n > 0) DESC, m.r ASC NULLS LAST, l.n DESC, m.value LIMIT {int(limit)}"
+        " SETTINGS max_execution_time = 30, join_use_nulls = 0", {"p": like})
+    if not rows:
+        return [], 0, 0
+    return [int(r[0]) for r in rows], int(rows[0][1]), int(rows[0][2])
 
 
 def _neighbors(query, frontier, types, per_type: int, hub: int, priority: str):
@@ -242,17 +255,19 @@ def build_graph(query, node_type: str, value: str, depth: int = 2, per_type: int
              triée ; tree : lien par lequel un nœud a été atteint, toujours
              gardé ; les autres (entre nœuds déjà présents) sont limités à
              max_edges au total, les plus vus d'abord
-      info   {roots, matches, truncated, hubs, dropped_edges}
+      info   {roots, matches, linked (correspondances qui ont des liens),
+              truncated, hubs, dropped_edges}
     """
     value = normalize(node_type, value)
     if is_pattern(value):
-        ids, matches = find_roots(query, node_type, value, max_roots)
+        ids, matches, linked = find_roots(query, node_type, value, max_roots)
     else:
         root_id = find_root(query, node_type, value)
-        ids, matches = ([] if root_id is None else [root_id]), int(root_id is not None)
+        ids = [] if root_id is None else [root_id]
+        matches = linked = len(ids)
     if not ids:
-        return {}, {}, {"roots": [], "matches": 0, "truncated": False, "hubs": 0,
-                        "dropped_edges": 0}
+        return {}, {}, {"roots": [], "matches": 0, "linked": 0, "truncated": False,
+                        "hubs": 0, "dropped_edges": 0}
     roots = [(node_type, i) for i in ids]
     nodes = {r: {"level": 0, "degree": {}, "shown": 0, "hub": False} for r in roots}
     edges = {}
@@ -321,7 +336,8 @@ def build_graph(query, node_type: str, value: str, depth: int = 2, per_type: int
     for key, info in nodes.items():
         info.setdefault("value", f"<{key[0]} {key[1]} sans valeur>")
         info.setdefault("rank", None)
-    return nodes, edges, {"roots": roots, "matches": matches, "truncated": truncated,
+    return nodes, edges, {"roots": roots, "matches": matches, "linked": linked,
+                          "truncated": truncated,
                           "dropped_edges": dropped,
                           "hubs": sum(n["hub"] for n in nodes.values())}
 
@@ -596,17 +612,18 @@ if not info["roots"]:
     st.warning(f"{cur_type} « {value} » introuvable.")
     st.stop()
 if pattern:
-    shown = len(info["roots"])
+    shown, linked = len(info["roots"]), info["linked"]
+    found = (f"{info['matches']:,} {cur_type} correspondent à « {value} », "
+             f"dont {linked:,} reliés à d'autres nœuds")
     if info["matches"] >= MATCH_CAP:
         st.warning(f"Plus de {MATCH_CAP:,} {cur_type} correspondent à « {value} » : "
-                   f"{shown} étoiles prises parmi les {MATCH_CAP:,} premiers trouvés "
-                   "(pas forcément les meilleurs rank). Préciser le motif.")
-    elif info["matches"] > shown:
-        st.caption(f"{info['matches']:,} {cur_type} correspondent à « {value} » : "
-                   f"les {shown} premiers (rank croissant) sont les étoiles "
-                   "(« Étoiles max » dans la barre latérale).")
+                   f"{shown} étoiles prises parmi les {MATCH_CAP:,} premiers trouvés. "
+                   "Préciser le motif.")
     else:
-        st.caption(f"{shown} {cur_type} correspondent à « {value} » : autant d'étoiles.")
+        st.caption(f"{found} : {shown} étoiles, les reliés d'abord, puis rank croissant "
+                   "(« Étoiles max » dans la barre latérale).")
+    if linked < shown:
+        st.caption(f"{shown - linked} étoile(s) sans aucun lien en base : seules.")
 
 by_type = defaultdict(int)
 for t, _ in nodes:

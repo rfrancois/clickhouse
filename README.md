@@ -369,7 +369,9 @@ grisée.
 est un `LIKE` (seul `%` est un joker, `_` reste littéral) ; chaque nœud
 trouvé devient une **étoile**, parcourues ensemble (niveau = distance à
 l'étoile la plus proche). Garde-fous : au plus **Étoiles max** (10, jusqu'à
-50), rank croissant pour `fqdn` et `ip` puis valeur ; au moins 3
+50) : celles qui ont des liens en base d'abord (un nœud sans aucun lien
+resterait une étoile seule), puis rank croissant pour `fqdn` et `ip`,
+nombre de liens, valeur ; au moins 3
 caractères en plus des `%` (`MIN_PATTERN`, l'index ngram est de 3) ; au
 plus 100 000 lignes trouvées lues pour les classer (`MATCH_CAP`, signalé :
 préciser le motif) ; requête coupée à 30 s. Le nombre de correspondances

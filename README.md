@@ -344,11 +344,33 @@ URL `?value=google.com` (`&type=ip` pour un autre type), ou
 
 Saisir un FQDN (ou un nœud d'un autre type) : la page parcourt `link` en largeur sur 1 à 4 sauts et affiche tout ce qui y est
 relié, disposé par forces (vis.js via pyvis). Couleur = type du nœud,
-étoile = nœud de départ, losange = hub. **Taille** = nombre de liens du
+étoile = nœud de départ (plusieurs avec un motif `%…%`), losange = hub. **Taille** = nombre de liens du
 nœud en base (ou, au choix, de liens affichés dans le graphe), en log et
 **relative au graphe** : du moins relié au plus relié, l'étiquette suit ;
 étiquettes par défaut sur les 25 plus gros nœuds (`TOP_LABELS`).
 Survol d'un nœud : valeur, rank, degré par type de voisin.
+
+**Voisins directs en évidence** (défaut) : les voisins directs d'une
+étoile sont cerclés et reliés à elle en couleur d'accent (blanc sur fond
+sombre), les nœuds plus lointains et leurs liens sont estompés.
+
+**Double-clic** sur un nœud : marqué **vu** (grisé, bord pointillé),
+double-clic à nouveau pour annuler. La marque est gardée dans le
+navigateur (`localStorage`, clé `neb_seen`) : elle survit au recentrage et
+aux changements de réglages ; « tout effacer » en haut à gauche du graphe.
+Le nœud de départ d'une recherche exacte est marqué vu d'office (il
+apparaît grisé quand on se recentre ailleurs) ; une étoile n'est jamais
+grisée.
+
+**Recherche par motif** : une valeur avec `%` (`%google%`, `google.%`)
+est un `LIKE` (seul `%` est un joker, `_` reste littéral) ; chaque nœud
+trouvé devient une **étoile**, parcourues ensemble (niveau = distance à
+l'étoile la plus proche). Garde-fous : au plus **Étoiles max** (10, jusqu'à
+50), rank croissant pour `fqdn` et `ip` puis valeur ; au moins 3
+caractères en plus des `%` (`MIN_PATTERN`, l'index ngram est de 3) ; au
+plus 100 000 lignes trouvées lues pour les classer (`MATCH_CAP`, signalé :
+préciser le motif) ; requête coupée à 30 s. Le nombre de correspondances
+est affiché ; les nœuds max s'appliquent à l'ensemble du graphe.
 
 Garde-fous (barre latérale) :
 - **voisins max par nœud et par type** (20) : les plus importants, selon
@@ -363,7 +385,7 @@ Garde-fous (barre latérale) :
 
   Candidats évalués : au plus 10 000 par niveau (`POOL_BUDGET`), les plus
   vus, à égalité tirés au hasard (hash de l'id) ; le nœud de départ a le
-  plus large échantillon. Essai : `google.com` avec 20 000 sous-domaines
+  plus large échantillon (les étoiles d'un motif se le partagent). Essai : `google.com` avec 20 000 sous-domaines
   sans autre lien, 500 sites reliés entre eux et 5 IP de CDN → `reliés`
   garde les sites et écarte les CDN, 0,4 s ;
 - **hub** (500 voisins) : nœud affiché mais pas développé (IP de CDN,

@@ -46,9 +46,9 @@ ranks: .venv
 misclassified:
 	$(PYTHON) scripts/find_misclassified.py $(if $(HOLDOUT),--holdout $(HOLDOUT))
 
-# Nébuleuse d'un FQDN (graphe des nœuds reliés) dans Streamlit
+# Galaxy : graphe des nœuds reliés à un FQDN, dans Streamlit
 graph:
-	CLICKHOUSE_HOST=localhost $(PYTHON) -m streamlit run streamlit/pages/nebuleuse.py
+	CLICKHOUSE_HOST=localhost $(PYTHON) -m streamlit run streamlit/pages/galaxy.py
 
 pdf: .venv
 	$(PYTHON) scripts/make_pdf.py

@@ -27,7 +27,7 @@ make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
 make misclassified [HOLDOUT=20]   # FQDN mal classifiés, clients des plateformes
-make graph        # nébuleuse d'un FQDN dans Streamlit (http://localhost:8501)
+make graph        # Galaxy : graphe d'un FQDN dans Streamlit (http://localhost:8501)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
 make down         # stoppe le conteneur
 make clean        # tout supprime (volume, venv, résultats)
@@ -323,27 +323,27 @@ séparateurs. Une abréviation (`nflxvideo.net` pour netflix) n'est pas
 reconnue. Correspondance dans `rapport.md.plugins.csv`, à garder (ne pas
 transmettre).
 
-## Nébuleuse d'un FQDN (graphe Streamlit)
+## Galaxy : graphe d'un FQDN (Streamlit)
 
 ```bash
 pip install streamlit pyvis clickhouse-connect pandas
 make graph        # → http://localhost:8501
 ```
 
-`streamlit/pages/nebuleuse.py` est une page de l'appli Streamlit du
+`streamlit/pages/galaxy.py` est une page de l'appli Streamlit du
 conteneur (`docker compose`, dossier `streamlit/` monté : un `git pull`
 suffit, sans reconstruire). `make graph` la lance seule, hors Docker, sur
 le ClickHouse de `localhost`. Page **autonome** : la copier dans le
 dossier `pages/` d'une autre appli multipage suffit aussi (aucun autre
 module du dépôt). Elle ne fixe pas `st.set_page_config` (laissé à l'appli)
-et préfixe ses clés de session par `neb_`. Connexion ClickHouse, première
+et préfixe ses clés de session par `galaxy_`. Connexion ClickHouse, première
 source trouvée : section `[clickhouse]` de `.streamlit/secrets.toml`
 (`host`, `port`, `username`, `password`, `database`), puis variables
 `CLICKHOUSE_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_DATABASE`, puis
 les valeurs du banc d'essai. Ouvrir la page sur un nœud depuis ailleurs :
 URL `?value=google.com` (`&type=ip` pour un autre type), ou
-`st.session_state["neb_root"] = ("fqdn", "google.com")` puis
-`st.switch_page("pages/nebuleuse.py")`.
+`st.session_state["galaxy_root"] = ("fqdn", "google.com")` puis
+`st.switch_page("pages/galaxy.py")`.
 
 Saisir un FQDN (ou un nœud d'un autre type) : la page parcourt `link` en largeur sur 1 à 4 sauts et affiche tout ce qui y est
 relié, disposé par forces (vis.js via pyvis). Couleur = type du nœud,
@@ -353,22 +353,29 @@ nœud en base (ou, au choix, de liens affichés dans le graphe), en log et
 étiquettes par défaut sur les 25 plus gros nœuds (`TOP_LABELS`).
 Survol d'un nœud : valeur, rank, degré par type de voisin.
 
-**Voisins directs en évidence** (défaut) : les voisins directs d'une
+**Highlight direct neighbors** (défaut) : les voisins directs d'une
 étoile sont cerclés et reliés à elle en couleur d'accent (blanc sur fond
 sombre), les nœuds plus lointains et leurs liens sont estompés.
 
 **Double-clic** sur un nœud : marqué **vu** (grisé, bord pointillé),
 double-clic à nouveau pour annuler. La marque est gardée dans le
-navigateur (`localStorage`, clé `neb_seen`) : elle survit au recentrage et
-aux changements de réglages ; « tout effacer » en haut à gauche du graphe.
+navigateur (`localStorage`, clé `galaxy_seen`) : elle survit au recentrage et
+aux changements de réglages ; « clear all » en haut à gauche du graphe.
 Le nœud de départ d'une recherche exacte est marqué vu d'office (il
 apparaît grisé quand on se recentre ailleurs) ; une étoile n'est jamais
 grisée.
 
+**Blacklist** : les plugins listés dans `streamlit/pages/galaxy_blacklist.txt`
+(un nom par ligne, valeur exacte de la table `plugin` ; lignes vides et
+lignes commençant par `#` ignorées) n'apparaissent jamais sur le graphe, ni
+comme étoile ni comme voisin, et leurs liens ne comptent pas dans les
+degrés. Fichier relu à chaque affichage (pas besoin de relancer l'appli) ;
+le nombre de plugins exclus est affiché en bas de la barre latérale.
+
 **Recherche par motif** : une valeur avec `%` (`%google%`, `google.%`)
 est un `LIKE` (seul `%` est un joker, `_` reste littéral) ; chaque nœud
 trouvé devient une **étoile**, parcourues ensemble (niveau = distance à
-l'étoile la plus proche). Garde-fous : au plus **Étoiles max** (10, jusqu'à
+l'étoile la plus proche). Garde-fous : au plus **Max stars** (10, jusqu'à
 50) : celles qui ont des liens en base d'abord (un nœud sans aucun lien
 resterait une étoile seule), puis rank croissant pour `fqdn` et `ip`,
 nombre de liens, valeur ; au moins 3
@@ -384,8 +391,8 @@ Garde-fous (barre latérale) :
 
   | Priorité | Voisins gardés d'abord |
   |---|---|
-  | `reliés` (défaut) | ceux qui ont d'autres liens sans être des hubs : ce qui structure la nébuleuse ; culs-de-sac et IP de CDN en dernier |
-  | `exclusifs` | ceux qui n'ont presque que ce lien |
+  | `linked` (défaut) | ceux qui ont d'autres liens sans être des hubs : ce qui structure la galaxie ; culs-de-sac et IP de CDN en dernier |
+  | `exclusive` | ceux qui n'ont presque que ce lien |
   | `sources` | liens vus par le plus de sources |
 
   Candidats évalués : au plus 10 000 par niveau (`POOL_BUDGET`), les plus
@@ -401,13 +408,13 @@ Garde-fous (barre latérale) :
   atteint, toujours gardés ; les autres (entre nœuds déjà présents) les
   plus vus d'abord, le reste masqué (signalé).
 
-La physique est coupée une fois la disposition stabilisée (« Figer après
-stabilisation ») : le graphe ne tremble plus et ne charge plus le
+La physique est coupée une fois la disposition stabilisée (« Freeze after
+stabilization ») : le graphe ne tremble plus et ne charge plus le
 navigateur.
 
 Les nœuds du dernier niveau ne sont pas développés, mais une dernière
 requête lit leur degré et, en option, les liens entre nœuds déjà présents
-(amas). « Recentrer sur » relance le parcours depuis un nœud du graphe ;
+(amas). « Recenter on » relance le parcours depuis un nœud du graphe ;
 tables et CSV des nœuds et des liens en bas de page.
 
 Coût : une requête par niveau sur la clé primaire de `link`

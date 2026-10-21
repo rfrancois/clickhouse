@@ -1,0 +1,3 @@
+# Plugins hidden from the Galaxy graph (streamlit/pages/galaxy.py).
+# One plugin name per line, exact value as stored in the plugin table.
+# Lines starting with # and blank lines are ignored.

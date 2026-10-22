@@ -1,7 +1,7 @@
 PYTHON := python3
 CLIENT := docker exec -i ch_container clickhouse-client --user chuser --password Royal15Raccoon --multiquery
 
-.PHONY: all up wait init upgrade generate test import ranks misclassified graph pdf down clean
+.PHONY: all up wait init upgrade generate test import ranks cc-ranks misclassified graph pdf down clean
 
 all: up wait init generate
 
@@ -40,6 +40,12 @@ import:
 ranks: .venv
 	@test -n "$(FILE)" -a -n "$(SOURCE)" || { echo "Usage : make ranks FILE=<ranks.csv[.gz]> SOURCE=<source_uuid> [WEEK=AAAA-MM-JJ] [TYPE=fqdn|ip]"; exit 1; }
 	$(PYTHON) scripts/send_ranks.py "$(FILE)" "$(SOURCE)" $(if $(WEEK),--week $(WEEK)) $(if $(TYPE),--type $(TYPE))
+
+# Classement Common Crawl (host-ranks / domain-ranks .txt.gz) → table rank.
+# WEEK facultatif comme ranks.
+cc-ranks: .venv
+	@test -n "$(FILE)" -a -n "$(SOURCE)" || { echo "Usage : make cc-ranks FILE=<host-ranks.txt.gz> SOURCE=<source_uuid> [WEEK=AAAA-MM-JJ]"; exit 1; }
+	$(PYTHON) scripts/import_cc_ranks.py "$(FILE)" "$(SOURCE)" $(if $(WEEK),--week $(WEEK))
 
 # FQDN mal classifiés (fqdn ↔ plugin) → table classification_candidate.
 # HOLDOUT facultatif : évaluation, % de FQDN classifiés cachés, rappel mesuré.

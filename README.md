@@ -26,6 +26,8 @@ make test         # test rapide : LIKE + jointure sur les tables optimisées
 make import FILE=archive.zip   # import de données réelles (voir ci-dessous)
 make ranks FILE=ranks.csv SOURCE=<source_uuid> [WEEK=2026-10-05] [TYPE=fqdn|ip]
                      # ranks d'une semaine → table rank (voir plus bas)
+make cc-ranks FILE=host-ranks.txt.gz SOURCE=<source_uuid> [WEEK=...]
+                     # classement Common Crawl → table rank (voir plus bas)
 make misclassified [HOLDOUT=20]   # FQDN mal classifiés, clients des plateformes
 make graph        # Galaxy : graphe d'un FQDN dans Streamlit (http://localhost:8501)
 make pdf          # régénère RAPPORT_OPTIMISATION.pdf
@@ -170,6 +172,28 @@ ORDER BY r.id_source, r.creation_date;
 ```
 
 Un seul `make ranks` à la fois.
+
+### Classement Common Crawl
+
+```bash
+make cc-ranks FILE=cc-main-...-host-ranks.txt.gz SOURCE=<source_uuid> WEEK=2026-10-05
+```
+
+`scripts/import_cc_ranks.py` lit le classement du web graph Common Crawl
+(`*-host-ranks.txt.gz` ou `*-domain-ranks.txt.gz`, tabulé :
+`harmonicc_pos`, `harmonicc_val`, `pr_pos`, `pr_val`, `host_rev`) et le
+passe à `send_ranks` (type `fqdn`, mêmes règles que `make ranks`) :
+- rank = `harmonicc_pos` : centralité harmonique, le classement de
+  référence de Common Crawl (fichier trié dessus), moins sensible aux
+  fermes de liens que `pr_pos` ; les scores bruts (`_val`) sont ignorés ;
+- valeur = `host_rev` remis à l'endroit (`com.google.www` →
+  `www.google.com`) ;
+- tout le fichier est envoyé (des centaines de millions d'hôtes, chacun
+  absent de `fqdn` y est créé) ;
+- envoi par paquets de 10 000 hôtes (`BATCH`), un appel à `send_ranks`
+  chacun, même semaine et même source : les paquets s'ajoutent, sans se
+  remplacer ;
+- `WEEK` : de préférence la date de publication du web graph.
 
 ## FQDN mal classifiés et clients des plateformes
 

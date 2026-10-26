@@ -63,7 +63,8 @@ Nodes of the last level (leaves) are not expanded, but one last query
 reads their degree and, optionally, the links between nodes already
 present (which reveals the galaxy's clusters).
 Display: physics is turned off once the layout has stabilized (the graph
-stops shaking and no longer loads the browser).
+stops shaking and no longer loads the browser). Fixed random seed: the
+same graph gets the same layout and framing on every load (F5).
 
 Values: tables of each type, through the p_id projection (search by id).
 Read only, link read only by its primary key.
@@ -545,7 +546,7 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
                                        "springLength": 90, "springConstant": 0.08,
                                        "avoidOverlap": 0.3},
                   "stabilization": {"iterations": 400, "updateInterval": 50}},
-      "layout": {"improvedLayout": false},
+      "layout": {"improvedLayout": false, "randomSeed": 1},
       "nodes": {"font": {"size": 12},
                 "scaling": {"min": 5, "max": 55,
                             "label": {"enabled": true, "min": 10, "max": 32,

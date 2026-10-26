@@ -621,6 +621,10 @@ def _cached_graph(cfg_key, node_type, value, depth, per_type, hub, max_nodes, ty
 
 
 # ------------------------------------------------------------ page
+# wide, as in main.py: on reload (F5) of this page, main.py does not run
+# and Streamlit would fall back to the narrow centered layout
+st.set_page_config(layout="wide")
+
 # current node: ?type=...&value=... in the URL (shareable), otherwise
 # st.session_state["galaxy_root"] (kept when switching pages)
 def _set_root(node_type: str, value: str):

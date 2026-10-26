@@ -38,12 +38,10 @@ comment line) never appear in the graph, neither as stars nor as neighbors;
 their links are not counted in the degrees. File read on every run.
 
 Reading the graph: direct neighbors of the stars circled and linked to
-their star in accent color, the rest faded. Click on a node: its details
-in the panel right of the graph, with a link to the search page
-(SEARCH_URL, new tab); Ctrl+click opens that search directly.
-Double-click on a node: marked seen (greyed, dashed border), remembered
-in the browser; the start node of an exact search is marked
-automatically.
+their star in accent color, the rest faded. Right-click on a node: menu
+opening the search page (SEARCH_URL) in a new tab. Double-click on a
+node: marked seen (greyed, dashed border), remembered in the browser; the
+start node of an exact search is marked automatically.
 
 Safeguards (sidebar):
   - at most NEIGHBORS neighbors per node and per neighbor type, the most
@@ -118,12 +116,9 @@ TOP_LABELS = 25
 MIN_PATTERN = 3
 MATCH_CAP = 100_000
 MAX_ROOTS = 50
-# search page opened (new tab) from the node panel or by Ctrl+click,
-# followed by the node's value, then &type=<node type>; relative to the
-# app's URL
+# search page opened (new tab) by a node's right-click menu, followed by
+# the node's value, then &type=<node type>; relative to the app's URL
 SEARCH_URL = "search?search="
-# width of the node panel right of the graph, in pixels
-PANEL_WIDTH = 260
 COLORS = {"fqdn": "#4f9dff", "ip": "#ff8c42", "application": "#3ecf8e",
           "capture": "#c77dff", "plugin": "#ff4d6d", "organization_name": "#ffd166",
           "organization_id": "#e9c46a", "phone": "#06d6a0", "social_id": "#90e0ef"}
@@ -401,8 +396,7 @@ def build_graph(query, node_type: str, value: str, depth: int = 2, per_type: int
 # seen nodes: a double-click marks (or unmarks) a node, kept in the
 # browser's localStorage (same origin as the app): the mark survives
 # recentering and settings changes. Stars are never greyed.
-# node panel (right of the graph): details of the last node clicked, link
-# to the search page (new tab); Ctrl+click opens it directly. __X__:
+# right-click on a node: menu opening the search page in a new tab. __X__:
 # replaced by to_html
 SEEN_JS = """
 (function () {
@@ -437,8 +431,7 @@ SEEN_JS = """
   function counter() {
     var n = 0;
     nodes.forEach(function (x) { if (seen.has(x.id)) n++; });
-    bar.innerHTML = "click: details · ctrl+click: search · double-click: mark seen · " +
-      n + " seen here" +
+    bar.innerHTML = "right-click: search · double-click: mark seen · " + n + " seen here" +
       (seen.size ? ' · <a href="#" style="color:inherit">clear all (' + seen.size + ")</a>" : "");
     var a = bar.querySelector("a");
     if (a) a.onclick = function (ev) {
@@ -446,43 +439,37 @@ SEEN_JS = """
     };
   }
   function repaint() { nodes.update(Object.keys(orig).map(look)); counter(); }
-  var panel = document.createElement("div"), shown = null;
-  panel.id = "galaxy_panel";
-  document.body.appendChild(panel);
-  function search(id) {  // "" for placeholder values (<...>)
-    var v = VALUES[id];
-    return v && v.charAt(0) !== "<" ? SEARCH + encodeURIComponent(v) +
-      "&type=" + encodeURIComponent(id.split(":")[0]) : "";
-  }
-  function details() {
-    panel.textContent = "";
-    if (shown === null) { panel.textContent = "Click a node: its details here."; return; }
-    var pre = document.createElement("div");
-    pre.style.whiteSpace = "pre-wrap";
-    pre.textContent = nodes.get(shown).title;
-    panel.appendChild(pre);
-    var url = search(shown);
-    if (url) {
-      var a = document.createElement("a");
-      a.href = url; a.target = "_blank"; a.rel = "noopener";
-      a.textContent = "search " + VALUES[shown] + " ↗";
-      panel.appendChild(a);
-    }
-  }
-  network.on("click", function (p) {
-    if (!p.nodes.length) return;
-    var id = p.nodes[0], ev = p.event && p.event.srcEvent;
-    if (ev && (ev.ctrlKey || ev.metaKey) && search(id)) window.open(search(id), "_blank", "noopener");
-    shown = id; details();
-  });
   network.on("doubleClick", function (p) {
     if (!p.nodes.length) return;
     var id = p.nodes[0];
     if (seen.has(id)) seen.delete(id); else seen.add(id);
     save(seen); nodes.update(look(id)); counter();
-    if (id === shown) details();
   });
-  repaint(); details();
+  var menu = document.createElement("div"), item = document.createElement("a");
+  menu.id = "galaxy_menu";
+  item.target = "_blank"; item.rel = "noopener";
+  item.textContent = "Ouvrir dans un nouvel onglet";
+  menu.appendChild(item);
+  document.body.appendChild(menu);
+  function closeMenu() { menu.style.display = "none"; }
+  network.on("oncontext", function (p) {
+    p.event.preventDefault();
+    var id = network.getNodeAt(p.pointer.DOM), v = id === undefined ? "" : VALUES[id];
+    // no search for placeholder values (<...>)
+    if (!v || v.charAt(0) === "<") { closeMenu(); return; }
+    item.href = SEARCH + encodeURIComponent(v) + "&type=" + encodeURIComponent(id.split(":")[0]);
+    menu.style.display = "block";
+    var x = p.event.clientX, y = p.event.clientY;
+    menu.style.left = Math.max(0, Math.min(x, window.innerWidth - menu.offsetWidth - 2)) + "px";
+    menu.style.top = Math.max(0, Math.min(y, window.innerHeight - menu.offsetHeight - 2)) + "px";
+  });
+  item.onclick = closeMenu;
+  document.addEventListener("mousedown", function (ev) {
+    if (!menu.contains(ev.target)) closeMenu();
+  });
+  document.addEventListener("keydown", function (ev) { if (ev.key === "Escape") closeMenu(); });
+  network.on("zoom", closeMenu);
+  repaint();
 })();
 """
 
@@ -517,7 +504,7 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
     weight = {key: (n["shown"] if size_by == SIZE_BY[1] else sum(n["degree"].values()))
               for key, n in nodes.items()}
     top = set(sorted(weight, key=lambda k: -weight[k])[:TOP_LABELS])
-    values = {}  # for the search link of the node panel (SEEN_JS)
+    values = {}  # for the search link of the right-click menu (SEEN_JS)
     for key, n in nodes.items():
         t, i = key
         total = sum(n["degree"].values())
@@ -585,17 +572,17 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
         seen_js = (' network.once("stabilizationIterationsDone", function () {'
                    ' network.setOptions({physics: false}); network.fit(); });' + seen_js)
     html = html.replace(new, new + seen_js, 1)
-    # no margin or border inside the Streamlit iframe; node panel right of
-    # the graph
-    side, line, link = (("#161a22", "#2a2e36", "#7cb8ff") if dark else
-                        ("#f6f7f9", "#e0e2e6", "#1a5fd0"))
+    # no margin or border inside the Streamlit iframe; right-click menu
+    side, line, lit = (("#1b1f27", "#3a3f48", "#2c323d") if dark else
+                       ("#ffffff", "#d0d3d8", "#eef1f5"))
     return html.replace(
-        "</head>", f"<style>body{{margin:0;background:{bg};display:flex}} "
-        ".card{flex:1;min-width:0} #mynetwork,.card{border:none !important} "
-        f"#galaxy_panel{{width:{PANEL_WIDTH}px;flex:none;height:{height}px;overflow:auto;"
-        f"box-sizing:border-box;padding:10px;font:12px sans-serif;color:{font};"
-        f"background:{side};border-left:1px solid {line}}} "
-        f"#galaxy_panel a{{display:block;margin-top:10px;color:{link};word-break:break-all}}"
+        "</head>", f"<style>body{{margin:0;background:{bg}}} "
+        "#mynetwork,.card{border:none !important} "
+        "#galaxy_menu{position:fixed;display:none;z-index:30;padding:4px 0;"
+        f"background:{side};border:1px solid {line};border-radius:4px;"
+        "box-shadow:0 2px 8px rgba(0,0,0,0.35);font:13px sans-serif} "
+        f"#galaxy_menu a{{display:block;padding:5px 14px;color:{font};text-decoration:none}} "
+        f"#galaxy_menu a:hover{{background:{lit}}}"
         "</style></head>", 1)
 
 

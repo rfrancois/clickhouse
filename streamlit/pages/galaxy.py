@@ -119,7 +119,8 @@ MIN_PATTERN = 3
 MATCH_CAP = 100_000
 MAX_ROOTS = 50
 # search page opened (new tab) from the node panel or by Ctrl+click,
-# followed by the node's value; relative to the app's URL
+# followed by the node's value, then &type=<node type>; relative to the
+# app's URL
 SEARCH_URL = "search?search="
 # width of the node panel right of the graph, in pixels
 PANEL_WIDTH = 260
@@ -450,7 +451,8 @@ SEEN_JS = """
   document.body.appendChild(panel);
   function search(id) {  // "" for placeholder values (<...>)
     var v = VALUES[id];
-    return v && v.charAt(0) !== "<" ? SEARCH + encodeURIComponent(v) : "";
+    return v && v.charAt(0) !== "<" ? SEARCH + encodeURIComponent(v) +
+      "&type=" + encodeURIComponent(id.split(":")[0]) : "";
   }
   function details() {
     panel.textContent = "";

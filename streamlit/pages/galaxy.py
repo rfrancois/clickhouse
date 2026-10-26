@@ -38,11 +38,12 @@ comment line) never appear in the graph, neither as stars nor as neighbors;
 their links are not counted in the degrees. File read on every run.
 
 Reading the graph: direct neighbors of the stars circled and linked to
-their star in accent color, the rest faded. Mouse over a node: its
-details in a bubble that stays open while the mouse is on it, with a link
-to the search page (SEARCH_URL, new tab). Double-click on a node: marked
-seen (greyed, dashed border), remembered in the browser; the start node
-of an exact search is marked automatically.
+their star in accent color, the rest faded. Click on a node: its details
+in the panel right of the graph, with a link to the search page
+(SEARCH_URL, new tab); Ctrl+click opens that search directly.
+Double-click on a node: marked seen (greyed, dashed border), remembered
+in the browser; the start node of an exact search is marked
+automatically.
 
 Safeguards (sidebar):
   - at most NEIGHBORS neighbors per node and per neighbor type, the most
@@ -117,9 +118,11 @@ TOP_LABELS = 25
 MIN_PATTERN = 3
 MATCH_CAP = 100_000
 MAX_ROOTS = 50
-# search page opened (new tab) from a node's bubble, followed by the
-# node's value; relative to the app's URL
+# search page opened (new tab) from the node panel or by Ctrl+click,
+# followed by the node's value; relative to the app's URL
 SEARCH_URL = "search?search="
+# width of the node panel right of the graph, in pixels
+PANEL_WIDTH = 260
 COLORS = {"fqdn": "#4f9dff", "ip": "#ff8c42", "application": "#3ecf8e",
           "capture": "#c77dff", "plugin": "#ff4d6d", "organization_name": "#ffd166",
           "organization_id": "#e9c46a", "phone": "#06d6a0", "social_id": "#90e0ef"}
@@ -397,13 +400,13 @@ def build_graph(query, node_type: str, value: str, depth: int = 2, per_type: int
 # seen nodes: a double-click marks (or unmarks) a node, kept in the
 # browser's localStorage (same origin as the app): the mark survives
 # recentering and settings changes. Stars are never greyed.
-# node bubble: shown on hover instead of the vis.js tooltip, stays open
-# while the mouse is on it (link to the search page, new tab). __X__:
+# node panel (right of the graph): details of the last node clicked, link
+# to the search page (new tab); Ctrl+click opens it directly. __X__:
 # replaced by to_html
 SEEN_JS = """
 (function () {
   var KEY = "galaxy_seen", stars = new Set(__STARS__), G = __GREY__, mem = [];
-  var TIPS = __TIPS__, SEARCH = __SEARCH__;
+  var VALUES = __VALUES__, SEARCH = __SEARCH__;
   function load() {
     try { return new Set(JSON.parse(localStorage.getItem(KEY) || "[]")); }
     catch (e) { return new Set(mem); }
@@ -413,15 +416,16 @@ SEEN_JS = """
     try { localStorage.setItem(KEY, JSON.stringify(mem)); } catch (e) {}
   }
   var seen = load(), orig = {};
-  nodes.forEach(function (n) { orig[n.id] = {color: n.color, font: n.font}; });
+  nodes.forEach(function (n) { orig[n.id] = {color: n.color, font: n.font, title: n.title}; });
   __AUTO__.forEach(function (id) { seen.add(id); });
   save(seen);
   function look(id) {
     var o = orig[id];
     if (!seen.has(id) || stars.has(id))
-      return {id: id, color: o.color, font: o.font, shapeProperties: {borderDashes: false}};
+      return {id: id, color: o.color, font: o.font, title: o.title,
+              shapeProperties: {borderDashes: false}};
     var c = {background: G.fill, border: G.border};
-    return {id: id, font: {color: G.font},
+    return {id: id, font: {color: G.font}, title: o.title + "\\n✓ seen (double-click: undo)",
             color: {background: c.background, border: c.border, highlight: c, hover: c},
             shapeProperties: {borderDashes: [3, 3]}};
   }
@@ -432,7 +436,8 @@ SEEN_JS = """
   function counter() {
     var n = 0;
     nodes.forEach(function (x) { if (seen.has(x.id)) n++; });
-    bar.innerHTML = "double-click: mark seen · " + n + " seen here" +
+    bar.innerHTML = "click: details · ctrl+click: search · double-click: mark seen · " +
+      n + " seen here" +
       (seen.size ? ' · <a href="#" style="color:inherit">clear all (' + seen.size + ")</a>" : "");
     var a = bar.querySelector("a");
     if (a) a.onclick = function (ev) {
@@ -440,49 +445,42 @@ SEEN_JS = """
     };
   }
   function repaint() { nodes.update(Object.keys(orig).map(look)); counter(); }
+  var panel = document.createElement("div"), shown = null;
+  panel.id = "galaxy_panel";
+  document.body.appendChild(panel);
+  function search(id) {  // "" for placeholder values (<...>)
+    var v = VALUES[id];
+    return v && v.charAt(0) !== "<" ? SEARCH + encodeURIComponent(v) : "";
+  }
+  function details() {
+    panel.textContent = "";
+    if (shown === null) { panel.textContent = "Click a node: its details here."; return; }
+    var pre = document.createElement("div");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = nodes.get(shown).title;
+    panel.appendChild(pre);
+    var url = search(shown);
+    if (url) {
+      var a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener";
+      a.textContent = "search " + VALUES[shown] + " ↗";
+      panel.appendChild(a);
+    }
+  }
+  network.on("click", function (p) {
+    if (!p.nodes.length) return;
+    var id = p.nodes[0], ev = p.event && p.event.srcEvent;
+    if (ev && (ev.ctrlKey || ev.metaKey) && search(id)) window.open(search(id), "_blank", "noopener");
+    shown = id; details();
+  });
   network.on("doubleClick", function (p) {
     if (!p.nodes.length) return;
     var id = p.nodes[0];
     if (seen.has(id)) seen.delete(id); else seen.add(id);
     save(seen); nodes.update(look(id)); counter();
+    if (id === shown) details();
   });
-  var tip = document.createElement("div"), hide = null;
-  tip.style.cssText = "position:fixed;display:none;z-index:20;max-width:360px;" +
-    "font:12px sans-serif;white-space:pre-wrap;padding:6px 8px;border-radius:4px;" +
-    "color:" + G.tip_text + ";background:" + G.tip + ";border:1px solid " + G.border +
-    ";box-shadow:0 2px 8px rgba(0,0,0,0.35)";
-  document.body.appendChild(tip);
-  function closeTip() { clearTimeout(hide); tip.style.display = "none"; }
-  function laterTip() { clearTimeout(hide); hide = setTimeout(closeTip, 400); }
-  tip.onmouseenter = function () { clearTimeout(hide); };
-  tip.onmouseleave = laterTip;
-  network.on("hoverNode", function (p) {
-    var id = p.node, t = TIPS[id];
-    if (!t) return;
-    clearTimeout(hide);
-    tip.textContent = t.text +
-      (seen.has(id) && !stars.has(id) ? "\\n✓ seen (double-click: undo)" : "");
-    if (t.value.charAt(0) !== "<") {
-      var a = document.createElement("a");
-      a.href = SEARCH + encodeURIComponent(t.value);
-      a.target = "_blank"; a.rel = "noopener";
-      a.textContent = "search " + t.value + " ↗";
-      a.style.cssText = "display:block;margin-top:6px;color:" + G.link;
-      tip.appendChild(a);
-    }
-    tip.style.display = "block";
-    // next to the pointer, on the other side if it overflows the frame
-    var r = container.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
-    var x = r.left + p.pointer.DOM.x, y = r.top + p.pointer.DOM.y;
-    x = x + 10 + w > window.innerWidth ? x - 10 - w : x + 10;
-    y = y + 10 + h > window.innerHeight ? y - 10 - h : y + 10;
-    tip.style.left = Math.max(0, x) + "px";
-    tip.style.top = Math.max(0, y) + "px";
-  });
-  network.on("blurNode", laterTip);
-  network.on("dragStart", closeTip);
-  network.on("zoom", closeTip);
-  repaint();
+  repaint(); details();
 })();
 """
 
@@ -517,7 +515,7 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
     weight = {key: (n["shown"] if size_by == SIZE_BY[1] else sum(n["degree"].values()))
               for key, n in nodes.items()}
     top = set(sorted(weight, key=lambda k: -weight[k])[:TOP_LABELS])
-    tips = {}  # node bubble (SEEN_JS), not the vis.js tooltip
+    values = {}  # for the search link of the node panel (SEEN_JS)
     for key, n in nodes.items():
         t, i = key
         total = sum(n["degree"].values())
@@ -537,10 +535,10 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
         fill = _rgba(base, 0.35) if focus and n["level"] >= 2 else base
         border = accent if near else fill
         lit = {"background": base, "border": accent}
-        tips[f"{t}:{i}"] = {"text": "\n".join(tip), "value": n["value"]}
+        values[f"{t}:{i}"] = n["value"]
         net.add_node(
             f"{t}:{i}", label=n["value"] if show or key in roots else " ",
-            value=math.log1p(weight[key]),
+            title="\n".join(tip), value=math.log1p(weight[key]),
             color={"background": fill, "border": border, "highlight": lit, "hover": lit},
             shape="star" if key in roots else ("diamond" if n["hub"] else "dot"),
             borderWidth=4 if key in roots else (3 if near else 1), borderWidthSelected=4)
@@ -571,26 +569,32 @@ def to_html(nodes, edges, roots, labels: str = "important", dark: bool = True,
     new = "network = new vis.Network(container, data, options);"
     assert new in html, "unexpected pyvis template"
     grey = ({"fill": "#3a3d44", "border": "#6b7079", "font": "#6b7079",
-             "text": "#9aa0a6", "panel": "rgba(14,17,23,0.8)",
-             "tip": "#1b1f27", "tip_text": "#e6e6e6", "link": "#7cb8ff"} if dark else
+             "text": "#9aa0a6", "panel": "rgba(14,17,23,0.8)"} if dark else
             {"fill": "#d6d6d6", "border": "#9a9a9a", "font": "#9a9a9a",
-             "text": "#555555", "panel": "rgba(255,255,255,0.85)",
-             "tip": "#ffffff", "tip_text": "#222222", "link": "#1a5fd0"})
-    # values from the database: no "</script>" inside the script; __TIPS__
+             "text": "#555555", "panel": "rgba(255,255,255,0.85)"})
+    # values from the database: no "</script>" inside the script; __VALUES__
     # last, so that no placeholder is replaced inside the values
     seen_js = (SEEN_JS.replace("__STARS__", json.dumps([f"{t}:{i}" for t, i in roots]))
                .replace("__GREY__", json.dumps(grey))
                .replace("__AUTO__", json.dumps([f"{t}:{i}" for t, i in mark_seen]))
                .replace("__SEARCH__", json.dumps(SEARCH_URL))
-               .replace("__TIPS__", json.dumps(tips).replace("</", "<\\/")))
+               .replace("__VALUES__", json.dumps(values).replace("</", "<\\/")))
     if freeze:
         seen_js = (' network.once("stabilizationIterationsDone", function () {'
                    ' network.setOptions({physics: false}); network.fit(); });' + seen_js)
     html = html.replace(new, new + seen_js, 1)
-    # no margin or border inside the Streamlit iframe
+    # no margin or border inside the Streamlit iframe; node panel right of
+    # the graph
+    side, line, link = (("#161a22", "#2a2e36", "#7cb8ff") if dark else
+                        ("#f6f7f9", "#e0e2e6", "#1a5fd0"))
     return html.replace(
-        "</head>", f"<style>body{{margin:0;background:{bg}}} "
-        "#mynetwork,.card{border:none !important}</style></head>", 1)
+        "</head>", f"<style>body{{margin:0;background:{bg};display:flex}} "
+        ".card{flex:1;min-width:0} #mynetwork,.card{border:none !important} "
+        f"#galaxy_panel{{width:{PANEL_WIDTH}px;flex:none;height:{height}px;overflow:auto;"
+        f"box-sizing:border-box;padding:10px;font:12px sans-serif;color:{font};"
+        f"background:{side};border-left:1px solid {line}}} "
+        f"#galaxy_panel a{{display:block;margin-top:10px;color:{link};word-break:break-all}}"
+        "</style></head>", 1)
 
 
 # ------------------------------------------------------------ connection
